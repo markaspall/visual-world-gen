@@ -139,6 +139,19 @@ export class WorldRenderer {
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
     });
     this.device.queue.writeBuffer(this.paramsBuffer, 0, paramsData);
+    
+    // Create bind group
+    this.bindGroup = this.device.createBindGroup({
+      layout: this.pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: this.cameraBuffer } },
+        { binding: 1, resource: { buffer: this.paramsBuffer } },
+        { binding: 2, resource: { buffer: this.heightBuffers.lod0 } },
+        { binding: 3, resource: { buffer: this.heightBuffers.lod1 } },
+        { binding: 4, resource: { buffer: this.heightBuffers.lod2 } },
+        { binding: 5, resource: { buffer: this.heightBuffers.lod3 } },
+      ]
+    });
   }
 
   setupInput() {
@@ -273,11 +286,9 @@ export class WorldRenderer {
     });
     
     renderPass.setPipeline(this.pipeline);
+    renderPass.setBindGroup(0, this.bindGroup);
     
-    // Bind resources (will need to create bind group)
-    // renderPass.setBindGroup(0, this.bindGroup);
-    
-    // Draw fullscreen quad
+    // Draw fullscreen quad (2 triangles = 6 vertices)
     renderPass.draw(6, 1, 0, 0);
     renderPass.end();
     
