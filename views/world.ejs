@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Enter World - Visual World Generator</title>
+  <link rel="stylesheet" href="/css/style.css">
+  <style>
+    body {
+      margin: 0;
+      overflow: hidden;
+      background: #000;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    }
+
+    #world-canvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      cursor: crosshair;
+    }
+
+    #hud {
+      position: absolute;
+      top: 20px;
+      left: 20px;
+      color: white;
+      background: rgba(0, 0, 0, 0.7);
+      padding: 15px 20px;
+      border-radius: 8px;
+      font-size: 14px;
+      line-height: 1.6;
+      pointer-events: none;
+      font-family: 'Courier New', monospace;
+    }
+
+    #controls-help {
+      position: absolute;
+      bottom: 20px;
+      left: 20px;
+      color: white;
+      background: rgba(0, 0, 0, 0.7);
+      padding: 15px 20px;
+      border-radius: 8px;
+      font-size: 12px;
+      line-height: 1.8;
+    }
+
+    #loading {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      color: white;
+      font-size: 24px;
+      text-align: center;
+    }
+
+    .btn {
+      position: absolute;
+      top: 20px;
+      right: 20px;
+      padding: 10px 20px;
+      background: var(--accent-primary);
+      color: white;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 600;
+      transition: all 0.2s;
+    }
+
+    .btn:hover {
+      background: var(--accent-secondary);
+      transform: translateY(-2px);
+    }
+  </style>
+</head>
+<body>
+  <canvas id="world-canvas"></canvas>
+  
+  <div id="loading">
+    <div>Loading world data...</div>
+    <div style="font-size: 14px; margin-top: 10px; opacity: 0.7;">Please select your world-data JSON file</div>
+  </div>
+
+  <div id="hud" style="display: none;">
+    <div><strong>📍 Position:</strong> <span id="pos">0, 0, 0</span></div>
+    <div><strong>👁️ Direction:</strong> <span id="dir">0, 0</span></div>
+    <div><strong>🏔️ Height:</strong> <span id="height">0</span>m</div>
+    <div><strong>🎯 FPS:</strong> <span id="fps">0</span></div>
+  </div>
+
+  <div id="controls-help">
+    <div><strong>🎮 Controls</strong></div>
+    <div><kbd>W/A/S/D</kbd> - Move</div>
+    <div><kbd>Space/Shift</kbd> - Up/Down</div>
+    <div><kbd>Mouse</kbd> - Look around</div>
+    <div><kbd>Esc</kbd> - Release pointer</div>
+  </div>
+
+  <button class="btn" onclick="location.href='/'">← Back to Editor</button>
+
+  <input type="file" id="file-input" accept=".json" style="display: none;">
+
+  <script type="module">
+    import { WorldRenderer } from '/js/worldRenderer.js';
+
+    const canvas = document.getElementById('world-canvas');
+    const loading = document.getElementById('loading');
+    const hud = document.getElementById('hud');
+    const fileInput = document.getElementById('file-input');
+
+    let renderer;
+
+    // Prompt user to load world data
+    fileInput.click();
+
+    fileInput.addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) {
+        alert('No file selected. Returning to editor.');
+        location.href = '/';
+        return;
+      }
+
+      try {
+        const text = await file.readText();
+        const worldData = JSON.parse(text);
+
+        console.log('World data loaded:', worldData);
+
+        // Hide loading, show HUD
+        loading.style.display = 'none';
+        hud.style.display = 'block';
+
+        // Initialize renderer
+        renderer = new WorldRenderer(canvas, worldData);
+        await renderer.init();
+        renderer.start();
+
+        // Update HUD
+        setInterval(() => {
+          if (renderer.camera) {
+            const pos = renderer.camera.position;
+            const rot = renderer.camera.rotation;
+            document.getElementById('pos').textContent = 
+              `${pos[0].toFixed(1)}, ${pos[1].toFixed(1)}, ${pos[2].toFixed(1)}`;
+            document.getElementById('dir').textContent = 
+              `${(rot[0] * 180 / Math.PI).toFixed(0)}°, ${(rot[1] * 180 / Math.PI).toFixed(0)}°`;
+            document.getElementById('height').textContent = pos[1].toFixed(1);
+            document.getElementById('fps').textContent = Math.round(renderer.fps || 0);
+          }
+        }, 100);
+
+      } catch (error) {
+        console.error('Failed to load world:', error);
+        alert(`Failed to load world: ${error.message}`);
+        location.href = '/';
+      }
+    });
+  </script>
+</body>
+</html>

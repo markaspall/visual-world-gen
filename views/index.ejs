@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title><%= title %></title>
+  <link rel="stylesheet" href="/css/style.css">
+  <link rel="stylesheet" href="/css/rete.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Header -->
+    <header class="header">
+      <div class="header-left">
+        <h1>🗺️ Procedural World Generator</h1>
+        <span class="subtitle">WebGPU-Accelerated Map Generation</span>
+      </div>
+      <div class="header-right">
+        <button id="btn-save" class="btn btn-secondary">💾 Save</button>
+        <button id="btn-load" class="btn btn-secondary">📂 Load</button>
+        <label class="auto-generate-label">
+          <input type="checkbox" id="auto-generate" />
+          <span>Auto-Generate</span>
+        </label>
+        <button id="btn-generate" class="btn btn-primary">⚡ Generate</button>
+        <button id="btn-export" class="btn btn-success">📥 Export PNG</button>
+      </div>
+    </header>
+
+    <!-- Main Layout: Three Columns -->
+    <main class="main-layout">
+      <!-- Column 1: Node Graph Editor -->
+      <section class="column column-nodes" id="column-nodes">
+        <div class="column-header">
+          <h2>Node Graph</h2>
+          <div class="toolbar">
+            <button id="btn-fullsize" class="btn btn-small" title="Toggle Full-Size Graph">⛶ Full Size</button>
+            <button id="btn-add-node" class="btn btn-small">➕ Add Node</button>
+            <button id="btn-auto-layout" class="btn btn-small" title="Auto-arrange nodes">🔀 Auto Layout</button>
+            <button id="btn-clear" class="btn btn-small">🗑️ Clear</button>
+          </div>
+        </div>
+        <div id="rete" class="rete-container"></div>
+      </section>
+
+      <!-- Column 2: Intermediary Data Visualization -->
+      <section class="column column-preview">
+        <div class="column-header">
+          <h2>Node Preview</h2>
+          <div class="info">
+            <span id="preview-info">Select a node to preview</span>
+          </div>
+        </div>
+        <div class="preview-container">
+          <canvas id="preview-canvas"></canvas>
+          <div id="preview-controls" class="preview-controls">
+            <div class="control-group">
+              <label>Colormap:</label>
+              <select id="colormap-select">
+                <option value="grayscale">Grayscale</option>
+                <option value="terrain">Terrain</option>
+                <option value="heat">Heat</option>
+                <option value="biome">Biome</option>
+              </select>
+            </div>
+            <div class="control-group">
+              <label>Resolution:</label>
+              <select id="resolution-select">
+                <option value="256">256x256</option>
+                <option value="512" selected>512x512</option>
+                <option value="1024">1024x1024</option>
+                <option value="2048">2048x2048</option>
+              </select>
+            </div>
+            <div class="control-group">
+              <label>Stats:</label>
+              <div id="preview-stats" class="stats"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Column 3: Final Outputs -->
+      <section class="column column-output">
+        <div class="column-header">
+          <h2>Final Outputs</h2>
+          <div class="tabs" id="output-tabs">
+            <button class="tab active" data-map="depth">Depth</button>
+            <button class="tab" data-map="biome">Biome</button>
+            <button class="tab" data-map="water">Water</button>
+            <button class="tab" data-map="features">Features</button>
+            <button class="tab" data-map="trails">Trails</button>
+            <button class="tab" data-map="blockmap">Block Map</button>
+          </div>
+        </div>
+        <div class="output-container">
+          <canvas id="output-canvas"></canvas>
+          <div id="output-info" class="output-info">
+            <div class="info-row">
+              <span>Resolution:</span>
+              <span id="output-resolution">-</span>
+            </div>
+            <div class="info-row">
+              <span>Generation Time:</span>
+              <span id="output-time">-</span>
+            </div>
+            <div class="info-row">
+              <span>Seed:</span>
+              <span id="output-seed">-</span>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- Parameter Panel -->
+    <section class="parameter-panel" id="parameter-panel">
+      <div class="param-panel-header">
+        <h3>Node Parameters</h3>
+        <span id="param-node-name">No node selected</span>
+      </div>
+      <div class="param-panel-content" id="param-panel-content">
+        <div class="param-hint">Select a node to edit its parameters</div>
+      </div>
+    </section>
+
+    <!-- Status Bar -->
+    <footer class="status-bar">
+      <div class="status-left">
+        <span id="gpu-status">🔍 Checking WebGPU...</span>
+        <span class="status-divider">|</span>
+        <span id="zoom-info">Zoom: 100% • Pan: Space+Drag or Middle-Click</span>
+      </div>
+      <div class="status-right">
+        <span id="generation-status">Ready</span>
+      </div>
+    </footer>
+
+    <!-- Add Node Modal -->
+    <div id="modal-add-node" class="modal">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>Add Node</h3>
+          <button class="modal-close">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="node-categories">
+            <div class="category">
+              <h4>Sources</h4>
+              <button class="node-type-btn" data-type="PerlinNoise">Perlin Noise</button>
+              <button class="node-type-btn" data-type="SeedInput">Seed Input</button>
+            </div>
+            <div class="category">
+              <h4>Operators</h4>
+              <button class="node-type-btn" data-type="Blend">Blend</button>
+              <button class="node-type-btn" data-type="Normalize">Normalize</button>
+              <button class="node-type-btn" data-type="Power">Power</button>
+              <button class="node-type-btn" data-type="Mask">Mask</button>
+            </div>
+            <div class="category">
+              <h4>Processors</h4>
+              <button class="node-type-btn" data-type="Erosion">Erosion</button>
+              <button class="node-type-btn" data-type="Terrace">Terrace</button>
+              <button class="node-type-btn" data-type="Water">Water</button>
+              <button class="node-type-btn" data-type="Temperature">Temperature</button>
+              <button class="node-type-btn" data-type="BiomeClassifier">Biome Classifier</button>
+              <button class="node-type-btn" data-type="SlopeMap">Slope Map</button>
+              <button class="node-type-btn" data-type="Features">Features</button>
+              <button class="node-type-btn" data-type="Trails">Trails</button>
+              <button class="node-type-btn" data-type="BlockClassifier">Block Classifier</button>
+              <button class="node-type-btn" data-type="GradientMap">Gradient Map</button>
+              <button class="node-type-btn" data-type="Classifier">Classifier</button>
+            </div>
+            <div class="category">
+              <h4>Outputs</h4>
+              <button class="node-type-btn" data-type="DepthOutput">Depth Output</button>
+              <button class="node-type-btn" data-type="BiomeOutput">Biome Output</button>
+              <button class="node-type-btn" data-type="WaterOutput">Water Output</button>
+              <button class="node-type-btn" data-type="FeaturesOutput">Features Output</button>
+              <button class="node-type-btn" data-type="TrailsOutput">Trails Output</button>
+              <button class="node-type-btn" data-type="BlockMapOutput">Block Map Output</button>
+            </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Scripts -->
+  <script type="module" src="/js/main.js"></script>
+</body>
+</html>

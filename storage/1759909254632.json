@@ -1,0 +1,133 @@
+{
+  "graph": {
+    "nodes": [
+      {
+        "id": "node-0",
+        "type": "SeedInput",
+        "x": 100,
+        "y": 100,
+        "params": {
+          "value": 1759903420801
+        },
+        "displayName": "Seed"
+      },
+      {
+        "id": "node-1",
+        "type": "PerlinNoise",
+        "x": 100,
+        "y": 250,
+        "params": {
+          "frequency": 3.7,
+          "octaves": 6,
+          "persistence": 0.5,
+          "lacunarity": 2,
+          "scale": 2.1
+        },
+        "displayName": "Base Terrain"
+      },
+      {
+        "id": "node-2",
+        "type": "Normalize",
+        "x": 100,
+        "y": 450,
+        "params": {
+          "min": 0,
+          "max": 1
+        },
+        "displayName": "Normalize Height"
+      },
+      {
+        "id": "node-3",
+        "type": "DepthOutput",
+        "x": 100,
+        "y": 650,
+        "params": {}
+      },
+      {
+        "id": "node-4",
+        "type": "PerlinNoise",
+        "x": 400,
+        "y": 250,
+        "params": {
+          "frequency": 1.6,
+          "octaves": 1,
+          "persistence": 0.21,
+          "lacunarity": 1.2,
+          "scale": 1.6
+        },
+        "displayName": "Moisture Map"
+      },
+      {
+        "id": "node-5",
+        "type": "Water",
+        "x": 400,
+        "y": 452,
+        "params": {
+          "seaLevel": 0.4,
+          "numSources": 20,
+          "sourceSeed": 12345,
+          "minSourceHeight": 0.6,
+          "riverDepth": 0.3,
+          "lakeDepth": 0.5
+        },
+        "displayName": "Water System"
+      },
+      {
+        "id": "node-6",
+        "type": "WaterOutput",
+        "x": 400,
+        "y": 650,
+        "params": {}
+      }
+    ],
+    "connections": [
+      {
+        "from": "node-0",
+        "output": "seed",
+        "to": "node-1",
+        "input": "seed"
+      },
+      {
+        "from": "node-1",
+        "output": "output",
+        "to": "node-2",
+        "input": "input"
+      },
+      {
+        "from": "node-2",
+        "output": "output",
+        "to": "node-3",
+        "input": "input"
+      },
+      {
+        "from": "node-0",
+        "output": "seed",
+        "to": "node-4",
+        "input": "seed"
+      },
+      {
+        "from": "node-2",
+        "output": "output",
+        "to": "node-5",
+        "input": "height"
+      },
+      {
+        "from": "node-4",
+        "output": "output",
+        "to": "node-5",
+        "input": "moisture"
+      },
+      {
+        "from": "node-5",
+        "output": "output",
+        "to": "node-6",
+        "input": "input"
+      }
+    ],
+    "seed": 1759903421473,
+    "resolution": 512,
+    "savedAt": "10/8/2025, 3:40:54 PM",
+    "nodeCount": 7,
+    "connectionCount": 7
+  }
+}

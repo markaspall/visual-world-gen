@@ -1,0 +1,8 @@
+{
+  "graph": "{\"nodes\":[{\"id\":\"node-0\",\"type\":\"SeedInput\",\"x\":100,\"y\":100,\"params\":{\"value\":1759902993917}},{\"id\":\"node-1\",\"type\":\"PerlinNoise\",\"x\":100,\"y\":249,\"params\":{\"frequency\":3.5,\"octaves\":2,\"persistence\":0.07,\"lacunarity\":1.2,\"scale\":1.6}},{\"id\":\"node-2\",\"type\":\"Normalize\",\"x\":100,\"y\":450,\"params\":{\"min\":60,\"max\":92}},{\"id\":\"node-3\",\"type\":\"DepthOutput\",\"x\":100,\"y\":600,\"params\":{}}],\"connections\":[{\"from\":\"node-0\",\"output\":\"seed\",\"to\":\"node-1\",\"input\":\"seed\"},{\"from\":\"node-1\",\"output\":\"output\",\"to\":\"node-2\",\"input\":\"input\"},{\"from\":\"node-2\",\"output\":\"output\",\"to\":\"node-3\",\"input\":\"input\"}]}",
+  "metadata": {
+    "timestamp": 1759903086727,
+    "seed": 1759902994538,
+    "resolution": 512
+  }
+}

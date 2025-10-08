@@ -1,0 +1,18 @@
+{
+  "name": "visual-world-gen",
+  "version": "1.0.0",
+  "description": "Browser-based procedural map generation system with WebGPU",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "keywords": ["webgpu", "procedural", "map-generation", "node-editor"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2",
+    "ejs": "^3.1.9"
+  }
+}

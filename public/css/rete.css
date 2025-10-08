@@ -1,0 +1,149 @@
+/* Rete.js Node Styling */
+.rete {
+  position: relative;
+  font-family: inherit;
+  font-size: 14px;
+}
+
+.rete .connection {
+  overflow: visible !important;
+  position: absolute;
+  z-index: 1;
+  pointer-events: none;
+}
+
+.rete .connection .main-path {
+  fill: none;
+  stroke: #4a9eff;
+  stroke-width: 3px;
+  pointer-events: auto;
+}
+
+.rete .connection .main-path:hover {
+  stroke: #6bb1ff;
+}
+
+.rete .node {
+  background: #2d2d2d;
+  border: 2px solid #3a3a3a;
+  border-radius: 8px;
+  cursor: pointer;
+  min-width: 200px;
+  box-sizing: border-box;
+  padding: 0;
+  position: absolute;
+  user-select: none;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  transition: border-color 0.2s;
+}
+
+.rete .node:hover {
+  border-color: #4a9eff;
+}
+
+.rete .node.selected {
+  border-color: #4a9eff;
+  box-shadow: 0 4px 24px rgba(74, 158, 255, 0.3);
+}
+
+.rete .node .title {
+  color: #e0e0e0;
+  font-family: inherit;
+  font-size: 14px;
+  padding: 12px;
+  background: rgba(0, 0, 0, 0.2);
+  border-bottom: 1px solid #3a3a3a;
+  font-weight: 600;
+  border-radius: 6px 6px 0 0;
+}
+
+.rete .node .output,
+.rete .node .input {
+  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  position: relative;
+}
+
+.rete .node .input {
+  justify-content: flex-start;
+}
+
+.rete .node .output {
+  justify-content: flex-end;
+}
+
+.rete .node .input-title,
+.rete .node .output-title {
+  color: #a0a0a0;
+  font-size: 13px;
+  margin: 0 8px;
+}
+
+.rete .node .socket {
+  display: inline-block;
+  cursor: pointer;
+  border: 2px solid #4a9eff;
+  border-radius: 50%;
+  width: 16px;
+  height: 16px;
+  background: #242424;
+  margin: 0;
+  vertical-align: middle;
+  transition: all 0.2s;
+  z-index: 2;
+  position: relative;
+}
+
+.rete .node .socket:hover {
+  border-width: 3px;
+  background: #4a9eff;
+}
+
+.rete .node .socket.used {
+  background: #4a9eff;
+}
+
+.rete .node .control {
+  padding: 8px 12px;
+}
+
+.rete .node .control input[type="number"],
+.rete .node .control input[type="text"] {
+  width: 100%;
+  padding: 6px 8px;
+  background: #1a1a1a;
+  border: 1px solid #3a3a3a;
+  border-radius: 4px;
+  color: #e0e0e0;
+  font-size: 13px;
+  font-family: inherit;
+}
+
+.rete .node .control input[type="range"] {
+  width: 100%;
+}
+
+.rete .node .control label {
+  display: block;
+  color: #a0a0a0;
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+
+/* Node type specific colors */
+.rete .node.source {
+  border-color: #4ade80;
+}
+
+.rete .node.operator {
+  border-color: #fbbf24;
+}
+
+.rete .node.processor {
+  border-color: #a78bfa;
+}
+
+.rete .node.output {
+  border-color: #f87171;
+}
