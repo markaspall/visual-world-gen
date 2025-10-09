@@ -1,0 +1,13 @@
+{
+  "seed": 1759903421473,
+  "resolution": 512,
+  "voxelSize": 0.333,
+  "files": {
+    "heightLOD0": "height_lod0_1759903421473.png",
+    "heightLOD1": "height_lod1_1759903421473.png",
+    "heightLOD2": "height_lod2_1759903421473.png",
+    "heightLOD3": "height_lod3_1759903421473.png",
+    "water": "water_1759903421473.png",
+    "blocks": "blocks_1759903421473.png"
+  }
+}

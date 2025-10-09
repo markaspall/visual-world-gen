@@ -1,18 +1,18 @@
 import { BaseNode } from './BaseNode.js';
 
 export class BlockClassifierNode extends BaseNode {
-  static inputs = ['biomes', 'water', 'height', 'noise1', 'biomeList'];
+  static inputs = ['biomes', 'water', 'height', 'noise1', 'biomeList', 'animations'];
   static outputs = ['terrainBlocks', 'waterBlocks', 'blockMapVis'];
   static defaultParams = {
     blocks: [
-      { id: 0, name: 'Air', color: '#000000', transparent: 1.0, emissive: 0.0, reflective: 0.0, refractive: 1.0 },
-      { id: 1, name: 'Grass', color: '#45b545', transparent: 0.0, emissive: 0.0, reflective: 0.0, refractive: 1.0 },
-      { id: 2, name: 'Dirt', color: '#8b5a3c', transparent: 0.0, emissive: 0.0, reflective: 0.0, refractive: 1.0 },
-      { id: 3, name: 'Stone', color: '#808080', transparent: 0.0, emissive: 0.0, reflective: 0.0, refractive: 1.0 },
-      { id: 4, name: 'Sand', color: '#edc9af', transparent: 0.0, emissive: 0.0, reflective: 0.0, refractive: 1.0 },
-      { id: 5, name: 'Snow', color: '#ffffff', transparent: 0.0, emissive: 0.0, reflective: 0.3, refractive: 1.0 },
-      { id: 6, name: 'Water', color: '#1e90ff', transparent: 0.8, emissive: 0.0, reflective: 0.2, refractive: 1.33 },
-      { id: 7, name: 'Tree Seed', color: '#228b22', transparent: 0.0, emissive: 0.0, reflective: 0.0, refractive: 1.0 },
+      { id: 0, name: 'Air', color: '#000000', transparent: 1.0, emissive: 0.0, reflective: 0.0, refractive: 1.0, animationId: null },
+      { id: 1, name: 'Grass', color: '#45b545', transparent: 0.0, emissive: 0.0, reflective: 0.0, refractive: 1.0, animationId: null },
+      { id: 2, name: 'Dirt', color: '#8b5a3c', transparent: 0.0, emissive: 0.0, reflective: 0.0, refractive: 1.0, animationId: null },
+      { id: 3, name: 'Stone', color: '#808080', transparent: 0.0, emissive: 0.0, reflective: 0.0, refractive: 1.0, animationId: null },
+      { id: 4, name: 'Sand', color: '#edc9af', transparent: 0.0, emissive: 0.0, reflective: 0.0, refractive: 1.0, animationId: null },
+      { id: 5, name: 'Snow', color: '#ffffff', transparent: 0.0, emissive: 0.0, reflective: 0.3, refractive: 1.0, animationId: null },
+      { id: 6, name: 'Water', color: '#1e90ff', transparent: 0.8, emissive: 0.0, reflective: 0.2, refractive: 1.33, animationId: null },
+      { id: 7, name: 'Tree Seed', color: '#228b22', transparent: 0.0, emissive: 0.0, reflective: 0.0, refractive: 1.0, animationId: null },
     ],
     biomeRules: [
       { biomeId: 0, biomeName: 'Deep Ocean', blocks: [{ blockId: 4, blockName: 'Sand', weight: 1.0 }], waterBlocks: [{ blockId: 6, blockName: 'Ocean Water', weight: 1.0 }] },

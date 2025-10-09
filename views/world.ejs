@@ -48,6 +48,7 @@
       line-height: 1.8;
     }
 
+
     #loading {
       position: absolute;
       top: 50%;
@@ -83,8 +84,10 @@
   <canvas id="world-canvas"></canvas>
   
   <div id="loading">
-    <div>Loading world data...</div>
-    <div style="font-size: 14px; margin-top: 10px; opacity: 0.7;">Please select your world-data JSON file</div>
+    <div style="font-size: 28px; margin-bottom: 20px;">🌍 Select a World</div>
+    <div id="world-list" style="max-width: 600px; margin: 20px auto;">
+      <div style="text-align: center; padding: 40px; color: #888;">Loading worlds...</div>
+    </div>
   </div>
 
   <div id="hud" style="display: none;">
@@ -102,9 +105,8 @@
     <div><kbd>Esc</kbd> - Release pointer</div>
   </div>
 
-  <button class="btn" onclick="location.href='/'">← Back to Editor</button>
 
-  <input type="file" id="file-input" accept=".json" style="display: none;">
+  <button class="btn" onclick="location.href='/'">← Back to Editor</button>
 
   <script type="module">
     import { WorldRenderer } from '/js/worldRenderer.js';
@@ -112,25 +114,63 @@
     const canvas = document.getElementById('world-canvas');
     const loading = document.getElementById('loading');
     const hud = document.getElementById('hud');
-    const fileInput = document.getElementById('file-input');
+    const worldList = document.getElementById('world-list');
 
     let renderer;
 
-    // Prompt user to load world data
-    fileInput.click();
-
-    fileInput.addEventListener('change', async (e) => {
-      const file = e.target.files[0];
-      if (!file) {
-        alert('No file selected. Returning to editor.');
-        location.href = '/';
-        return;
-      }
-
+    // Load available worlds
+    async function loadWorldList() {
       try {
-        const text = await file.readText();
-        const worldData = JSON.parse(text);
+        const response = await fetch('/api/worlds');
+        const worlds = await response.json();
 
+        if (worlds.length === 0) {
+          worldList.innerHTML = `
+            <div style="text-align: center; padding: 40px; color: #888;">
+              <p>No worlds available.</p>
+              <p style="font-size: 14px; margin-top: 10px;">Generate and export a world from the editor first!</p>
+            </div>
+          `;
+          return;
+        }
+
+        // Sort by creation date (newest first)
+        worlds.sort((a, b) => new Date(b.created) - new Date(a.created));
+
+        worldList.innerHTML = worlds.map(world => `
+          <div style="background: rgba(255,255,255,0.05); padding: 20px; margin-bottom: 10px; border-radius: 8px; cursor: pointer; transition: all 0.2s;"
+               onmouseover="this.style.background='rgba(255,255,255,0.1)'"
+               onmouseout="this.style.background='rgba(255,255,255,0.05)'"
+               onclick="loadWorld('${world.id}')">
+            <div style="font-size: 18px; font-weight: bold;">🌍 ${world.id}</div>
+            <div style="font-size: 14px; color: #aaa; margin-top: 5px;">
+              Seed: ${world.seed} | Resolution: ${world.resolution}×${world.resolution}
+            </div>
+            <div style="font-size: 12px; color: #888; margin-top: 5px;">
+              Created: ${new Date(world.created).toLocaleString()}
+            </div>
+          </div>
+        `).join('');
+
+      } catch (error) {
+        console.error('Failed to load world list:', error);
+        worldList.innerHTML = `
+          <div style="text-align: center; padding: 40px; color: #f88;">
+            ❌ Failed to load worlds: ${error.message}
+          </div>
+        `;
+      }
+    }
+
+    // Load a specific world
+    window.loadWorld = async function(worldId) {
+      try {
+        console.log('Loading world:', worldId);
+        
+        const response = await fetch(`/api/worlds/${worldId}`);
+        if (!response.ok) throw new Error('Failed to load world');
+        
+        const worldData = await response.json();
         console.log('World data loaded:', worldData);
 
         // Hide loading, show HUD
@@ -159,9 +199,12 @@
       } catch (error) {
         console.error('Failed to load world:', error);
         alert(`Failed to load world: ${error.message}`);
-        location.href = '/';
+        location.reload(); // Go back to world list
       }
-    });
+    };
+
+    // Load world list on page load
+    loadWorldList();
   </script>
 </body>
 </html>

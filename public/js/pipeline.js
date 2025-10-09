@@ -20,6 +20,7 @@ import { HeightLODNode } from './nodes/HeightLODNode.js';
 import { ErosionNode } from './nodes/ErosionNode.js';
 import { ClassifierNode } from './nodes/ClassifierNode.js';
 import { CombineNode } from './nodes/CombineNode.js';
+import { SurfaceAnimationNode } from './nodes/SurfaceAnimationNode.js';
 import { GradientMapNode } from './nodes/GradientMapNode.js';
 import { TerraceNode } from './nodes/TerraceNode.js';
 import { MaskNode } from './nodes/MaskNode.js';
@@ -68,6 +69,7 @@ export class PipelineManager {
     this.nodeTypes.set('Erosion', ErosionNode);
     this.nodeTypes.set('Classifier', ClassifierNode);
     this.nodeTypes.set('Combine', CombineNode);
+    this.nodeTypes.set('SurfaceAnimation', SurfaceAnimationNode);
     this.nodeTypes.set('GradientMap', GradientMapNode);
     this.nodeTypes.set('Terrace', TerraceNode);
     this.nodeTypes.set('Mask', MaskNode);
@@ -246,6 +248,12 @@ export class PipelineManager {
           resolution: this.resolution
         };
       }
+    }
+    
+    // Some nodes (like SurfaceAnimation) don't produce visualizable data
+    // Return null to indicate no visualization needed
+    if (nodeData.type === 'SurfaceAnimation') {
+      return null;
     }
     
     throw new Error('No output data from node');

@@ -2,14 +2,16 @@ import { BaseNode } from './BaseNode.js';
 
 /**
  * Normalize Node
- * Normalizes input data to [0, 1] range
+ * Normalizes input data to [min, max] range
+ * Can passthrough data unchanged if passthrough is enabled
  */
 export class NormalizeNode extends BaseNode {
   static inputs = ['input'];
   static outputs = ['output'];
   static defaultParams = {
     min: 0.0,
-    max: 1.0
+    max: 1.0,
+    passthrough: false
   };
 
   async process(inputs, params) {
@@ -21,6 +23,13 @@ export class NormalizeNode extends BaseNode {
     const resolution = params.resolution || 512;
     const targetMin = params.min || 0.0;
     const targetMax = params.max || 1.0;
+    const passthrough = params.passthrough || false;
+    
+    // Passthrough mode - return data unchanged
+    if (passthrough) {
+      console.log('NormalizeNode: Passthrough enabled, skipping normalization');
+      return { output: data };
+    }
 
     // Find min/max
     let min = Infinity;

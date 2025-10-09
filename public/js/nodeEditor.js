@@ -48,6 +48,28 @@ export class NodeEditor {
     this.canvas.addEventListener('mousemove', this.onMouseMove.bind(this));
     this.canvas.addEventListener('mouseup', this.onMouseUp.bind(this));
     this.canvas.addEventListener('wheel', this.onWheel.bind(this), { passive: false });
+    
+    // Click outside to close parameter panel
+    document.addEventListener('mousedown', (e) => {
+      const panel = document.getElementById('parameter-panel');
+      if (!panel || !panel.classList.contains('active')) return;
+      
+      // Check if click is outside both canvas and panel
+      const clickedPanel = panel.contains(e.target);
+      const clickedCanvas = this.canvas.contains(e.target);
+      
+      if (!clickedPanel && !clickedCanvas) {
+        // Cleanup animations before closing
+        if (this.animationCleanups) {
+          this.animationCleanups.forEach(cleanup => cleanup());
+          this.animationCleanups = [];
+        }
+        
+        this.selectedNode = null;
+        panel.classList.remove('active');
+        this.render();
+      }
+    });
     this.canvas.addEventListener('contextmenu', this.onContextMenu.bind(this));
     this.canvas.addEventListener('dblclick', this.onDoubleClick.bind(this));
     
@@ -811,11 +833,18 @@ export class NodeEditor {
     this.updateParameterUI();
     
     try {
+      // Special handling for SurfaceAnimation - show animated preview
+      if (this.selectedNode.type === 'SurfaceAnimation') {
+        previewInfo.textContent = `Live Animation Preview`;
+        this.renderAnimationInPreviewPanel(this.selectedNode.params);
+        return;
+      }
+      
       // Get the node's output data
       const result = await this.pipeline.executeNode(this.selectedNode, this.getGraph());
       
       if (result === null) {
-        // Preview skipped for expensive nodes
+        // Preview skipped for nodes that don't produce visualizable data
         previewInfo.textContent = `Preview skipped (run Generate to see output)`;
       } else if (result && result.data) {
         const stats = this.visualizer.calculateStats(result.data);
@@ -834,18 +863,33 @@ export class NodeEditor {
     
     if (!container) return;
     
+    // Cleanup any running animations
+    if (this.animationCleanups) {
+      this.animationCleanups.forEach(cleanup => cleanup());
+      this.animationCleanups = [];
+    }
+    
     if (!this.selectedNode) {
       container.innerHTML = '<div class="param-hint">Select a node to edit its parameters</div>';
-      nodeName.textContent = 'No node selected';
       panel.classList.remove('active');
       return;
     }
     
     // Show panel when node is selected
     panel.classList.add('active');
-    
     nodeName.textContent = this.selectedNode.type;
     container.innerHTML = '';
+    
+    // Merge in any new default params (for nodes created before new params were added)
+    const nodeClass = this.pipeline.getNodeClass(this.selectedNode.type);
+    if (nodeClass && nodeClass.defaultParams) {
+      for (const [key, value] of Object.entries(nodeClass.defaultParams)) {
+        if (!(key in this.selectedNode.params)) {
+          this.selectedNode.params[key] = value;
+          console.log(`Added missing param '${key}' to ${this.selectedNode.type} node`);
+        }
+      }
+    }
     
     const params = this.selectedNode.params;
     
@@ -864,6 +908,12 @@ export class NodeEditor {
     // Special handling for BlockClassifier tables
     if (this.selectedNode.type === 'BlockClassifier') {
       this.renderBlockClassifierTables(container, params);
+      return;
+    }
+    
+    // Special handling for SurfaceAnimation
+    if (this.selectedNode.type === 'SurfaceAnimation') {
+      this.renderSurfaceAnimationUI(container, params);
       return;
     }
     
@@ -909,17 +959,49 @@ export class NodeEditor {
         slider.max = max;
         slider.step = step;
         slider.value = value;
+        slider.title = 'Hold Shift for 10x finer control';
         
-        const valueDisplay = document.createElement('span');
-        valueDisplay.className = 'value';
-        valueDisplay.textContent = typeof value === 'number' && !Number.isInteger(value) 
+        // Editable number input for fine-tuning
+        const numberInput = document.createElement('input');
+        numberInput.type = 'number';
+        numberInput.className = 'param-number-input';
+        numberInput.min = min;
+        numberInput.max = max;
+        numberInput.step = step;
+        numberInput.value = typeof value === 'number' && !Number.isInteger(value) 
           ? value.toFixed(2) 
           : value.toString();
+        numberInput.style.width = '60px';
+        numberInput.style.marginLeft = '8px';
+        numberInput.title = 'Scroll to adjust, or type exact value';
         
+        // Fine control with shift key
+        let baseStep = step;
+        slider.addEventListener('mousedown', () => {
+          const updateStep = (e) => {
+            slider.step = e.shiftKey ? baseStep / 10 : baseStep;
+          };
+          updateStep({ shiftKey: false });
+          
+          const keyHandler = (e) => updateStep(e);
+          document.addEventListener('keydown', keyHandler);
+          document.addEventListener('keyup', keyHandler);
+          
+          const cleanup = () => {
+            document.removeEventListener('keydown', keyHandler);
+            document.removeEventListener('keyup', keyHandler);
+            slider.step = baseStep;
+          };
+          
+          slider.addEventListener('mouseup', cleanup, { once: true });
+          document.addEventListener('mouseup', cleanup, { once: true });
+        });
+        
+        // Update both when slider changes
         slider.addEventListener('input', (e) => {
           const newValue = parseFloat(e.target.value);
           this.selectedNode.params[key] = newValue;
-          valueDisplay.textContent = !Number.isInteger(newValue) 
+          numberInput.value = !Number.isInteger(newValue) 
             ? newValue.toFixed(2) 
             : newValue.toString();
         });
@@ -928,8 +1010,37 @@ export class NodeEditor {
           this.refreshPreview();
         });
         
+        // Update both when number input changes
+        numberInput.addEventListener('input', (e) => {
+          const newValue = parseFloat(e.target.value);
+          if (!isNaN(newValue)) {
+            this.selectedNode.params[key] = newValue;
+            slider.value = newValue;
+          }
+        });
+        
+        numberInput.addEventListener('change', () => {
+          this.refreshPreview();
+        });
+        
+        // Scroll to adjust (fine control)
+        numberInput.addEventListener('wheel', (e) => {
+          e.preventDefault();
+          const currentValue = parseFloat(numberInput.value) || 0;
+          const scrollStep = e.shiftKey ? step / 10 : step;
+          const delta = e.deltaY > 0 ? -scrollStep : scrollStep;
+          const newValue = Math.max(min, Math.min(max, currentValue + delta));
+          
+          numberInput.value = !Number.isInteger(newValue) 
+            ? newValue.toFixed(2) 
+            : newValue.toString();
+          slider.value = newValue;
+          this.selectedNode.params[key] = newValue;
+          this.refreshPreview();
+        });
+        
         display.appendChild(slider);
-        display.appendChild(valueDisplay);
+        display.appendChild(numberInput);
         paramItem.appendChild(label);
         paramItem.appendChild(display);
       } else if (typeof value === 'string') {
@@ -944,6 +1055,18 @@ export class NodeEditor {
         
         paramItem.appendChild(label);
         paramItem.appendChild(input);
+      } else if (typeof value === 'boolean') {
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.checked = value;
+        
+        checkbox.addEventListener('change', (e) => {
+          this.selectedNode.params[key] = e.target.checked;
+          this.refreshPreview();
+        });
+        
+        paramItem.appendChild(label);
+        paramItem.appendChild(checkbox);
       } else if (Array.isArray(value)) {
         const input = document.createElement('input');
         input.type = 'text';
@@ -1292,6 +1415,20 @@ export class NodeEditor {
     const blocks = params.blocks || [];
     const biomeRules = params.biomeRules || [];
     
+    // Get connected animation nodes
+    const animationNodes = [];
+    const incomingAnimations = this.connections.filter(c => 
+      c.to === this.selectedNode.id && c.input === 'animations'
+    );
+    incomingAnimations.forEach(conn => {
+      const node = this.nodes.get(conn.from);
+      if (node && node.type === 'SurfaceAnimation') {
+        animationNodes.push({ id: node.id, name: node.params.name });
+      }
+    });
+    
+    console.log(`Found ${animationNodes.length} connected animations:`, animationNodes);
+    
     // Two-column layout container
     const twoColContainer = document.createElement('div');
     twoColContainer.style.cssText = 'display: grid; grid-template-columns: 1fr 1fr; gap: 16px;';
@@ -1332,16 +1469,21 @@ export class NodeEditor {
 
     // Blocks Header
     const blocksHeader = document.createElement('div');
-    blocksHeader.style.cssText = 'display: grid; grid-template-columns: 60px 1.2fr 60px 0.8fr 0.8fr 0.8fr 0.8fr 50px; gap: 8px; font-weight: 600; padding: 10px 12px; background: var(--bg-tertiary); position: sticky; top: 0; z-index: 1; border-bottom: 2px solid var(--border-color); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-secondary);';
-    blocksHeader.innerHTML = '<div>ID</div><div>Name</div><div>Color</div><div>Trans</div><div>Emis</div><div>Refl</div><div>Refr</div><div></div>';
+    blocksHeader.style.cssText = 'display: grid; grid-template-columns: 50px 1fr 50px 0.7fr 0.7fr 0.7fr 0.7fr 1.2fr 40px; gap: 8px; font-weight: 600; padding: 10px 12px; background: var(--bg-tertiary); position: sticky; top: 0; z-index: 1; border-bottom: 2px solid var(--border-color); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-secondary);';
+    blocksHeader.innerHTML = '<div>ID</div><div>Name</div><div>Color</div><div>Trans</div><div>Emis</div><div>Refl</div><div>Refr</div><div>Anim</div><div></div>';
     blocksTable.appendChild(blocksHeader);
 
     // Blocks Rows
     blocks.forEach((block, index) => {
       const row = document.createElement('div');
-      row.style.cssText = 'display: grid; grid-template-columns: 60px 1.2fr 60px 0.8fr 0.8fr 0.8fr 0.8fr 50px; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--border-color); align-items: center; transition: background 0.2s;';
+      row.style.cssText = 'display: grid; grid-template-columns: 50px 1fr 50px 0.7fr 0.7fr 0.7fr 0.7fr 1.2fr 40px; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--border-color); align-items: center; transition: background 0.2s;';
       row.addEventListener('mouseenter', () => row.style.background = 'var(--bg-tertiary)');
       row.addEventListener('mouseleave', () => row.style.background = 'transparent');
+      
+      // Ensure block has animationId property
+      if (block.animationId === undefined) {
+        block.animationId = null;
+      }
       
       // ID (readonly)
       const idDiv = document.createElement('div');
@@ -1384,6 +1526,32 @@ export class NodeEditor {
         return input;
       };
       
+      // Animation dropdown
+      const animSelect = document.createElement('select');
+      animSelect.style.cssText = 'width: 100%; padding: 6px 8px; font-size: 0.7rem; background: var(--bg-primary); border: 1px solid var(--border-color); border-radius: 4px; color: var(--text-primary);';
+      
+      // Add "None" option
+      const noneOption = document.createElement('option');
+      noneOption.value = '';
+      noneOption.textContent = 'None';
+      animSelect.appendChild(noneOption);
+      
+      // Add connected animation nodes
+      animationNodes.forEach(anim => {
+        const option = document.createElement('option');
+        option.value = anim.id;
+        option.textContent = anim.name;
+        animSelect.appendChild(option);
+      });
+      
+      // Set current value
+      animSelect.value = block.animationId || '';
+      
+      animSelect.addEventListener('change', (e) => {
+        block.animationId = e.target.value || null;
+        this.refreshPreview();
+      });
+      
       // Delete button
       const deleteBtn = document.createElement('button');
       deleteBtn.textContent = '×';
@@ -1403,6 +1571,7 @@ export class NodeEditor {
       row.appendChild(createPropInput('emissive', block.emissive || 0));
       row.appendChild(createPropInput('reflective', block.reflective || 0));
       row.appendChild(createPropInput('refractive', block.refractive || 1.0));
+      row.appendChild(animSelect);
       row.appendChild(deleteBtn);
       
       blocksTable.appendChild(row);
@@ -1512,5 +1681,279 @@ export class NodeEditor {
     twoColContainer.appendChild(leftCol);
     twoColContainer.appendChild(rightCol);
     container.appendChild(twoColContainer);
+  }
+
+  renderSurfaceAnimationUI(container, params) {
+    // Name input
+    const nameGroup = document.createElement('div');
+    nameGroup.style.cssText = 'margin-bottom: 16px;';
+    
+    const nameLabel = document.createElement('label');
+    nameLabel.textContent = 'Animation Name';
+    nameLabel.style.cssText = 'display: block; margin-bottom: 6px; font-size: 0.85rem; color: var(--text-secondary);';
+    
+    const nameInput = document.createElement('input');
+    nameInput.type = 'text';
+    nameInput.value = params.name || 'Water Ripples';
+    nameInput.style.cssText = 'width: 100%; padding: 8px; font-size: 0.9rem; background: var(--bg-primary); border: 1px solid var(--border-color); border-radius: 4px; color: var(--text-primary);';
+    nameInput.addEventListener('input', (e) => {
+      params.name = e.target.value;
+      this.refreshPreview();
+    });
+    
+    nameGroup.appendChild(nameLabel);
+    nameGroup.appendChild(nameInput);
+    container.appendChild(nameGroup);
+    
+    // Type dropdown
+    const typeGroup = document.createElement('div');
+    typeGroup.style.cssText = 'margin-bottom: 16px;';
+    
+    const typeLabel = document.createElement('label');
+    typeLabel.textContent = 'Pattern Type';
+    typeLabel.style.cssText = 'display: block; margin-bottom: 6px; font-size: 0.85rem; color: var(--text-secondary);';
+    
+    const typeSelect = document.createElement('select');
+    typeSelect.style.cssText = 'width: 100%; padding: 8px; font-size: 0.9rem; background: var(--bg-primary); border: 1px solid var(--border-color); border-radius: 4px; color: var(--text-primary);';
+    
+    const types = [
+      { value: 'ripples', label: 'Ripples (Multi-octave noise)' },
+      { value: 'flow', label: 'Flow (Directional)' },
+      { value: 'sway', label: 'Sway (Sine wave)' },
+      { value: 'shimmer', label: 'Shimmer (Fast noise)' }
+    ];
+    
+    types.forEach(t => {
+      const option = document.createElement('option');
+      option.value = t.value;
+      option.textContent = t.label;
+      typeSelect.appendChild(option);
+    });
+    
+    typeSelect.value = params.type || 'ripples';
+    typeSelect.addEventListener('change', (e) => {
+      params.type = e.target.value;
+      this.refreshPreview();
+    });
+    
+    typeGroup.appendChild(typeLabel);
+    typeGroup.appendChild(typeSelect);
+    container.appendChild(typeGroup);
+    
+    // Sliders for parameters
+    const sliderParams = [
+      { key: 'speed', label: 'Speed', min: 0, max: 2, step: 0.1 },
+      { key: 'scale', label: 'Scale', min: 0.05, max: 1, step: 0.01 },
+      { key: 'strength', label: 'Strength', min: 0, max: 0.5, step: 0.01 },
+      { key: 'octaves', label: 'Octaves', min: 1, max: 5, step: 1 }
+    ];
+    
+    sliderParams.forEach(({ key, label, min, max, step }) => {
+      const group = document.createElement('div');
+      group.style.cssText = 'margin-bottom: 12px;';
+      
+      const labelEl = document.createElement('label');
+      labelEl.textContent = label;
+      labelEl.style.cssText = 'display: block; margin-bottom: 4px; font-size: 0.85rem; color: var(--text-secondary);';
+      
+      const sliderContainer = document.createElement('div');
+      sliderContainer.style.cssText = 'display: flex; align-items: center; gap: 10px;';
+      
+      const slider = document.createElement('input');
+      slider.type = 'range';
+      slider.min = min;
+      slider.max = max;
+      slider.step = step;
+      slider.value = params[key] || (key === 'octaves' ? 3 : key === 'speed' ? 0.5 : key === 'scale' ? 0.15 : 0.08);
+      slider.style.cssText = 'flex: 1;';
+      
+      const valueDisplay = document.createElement('span');
+      valueDisplay.textContent = slider.value;
+      valueDisplay.style.cssText = 'min-width: 50px; text-align: right; font-family: monospace; font-size: 0.85rem; color: var(--text-primary);';
+      
+      slider.addEventListener('input', (e) => {
+        params[key] = parseFloat(e.target.value);
+        valueDisplay.textContent = e.target.value;
+        this.refreshPreview();
+      });
+      
+      sliderContainer.appendChild(slider);
+      sliderContainer.appendChild(valueDisplay);
+      
+      group.appendChild(labelEl);
+      group.appendChild(sliderContainer);
+      container.appendChild(group);
+    });
+    
+    // Direction (for flow type)
+    if (params.type === 'flow') {
+      const dirGroup = document.createElement('div');
+      dirGroup.style.cssText = 'margin-top: 16px;';
+      
+      const dirLabel = document.createElement('label');
+      dirLabel.textContent = 'Flow Direction';
+      dirLabel.style.cssText = 'display: block; margin-bottom: 6px; font-size: 0.85rem; color: var(--text-secondary);';
+      dirGroup.appendChild(dirLabel);
+      
+      ['x', 'y'].forEach(axis => {
+        const axisGroup = document.createElement('div');
+        axisGroup.style.cssText = 'display: flex; align-items: center; gap: 10px; margin-bottom: 8px;';
+        
+        const axisLabel = document.createElement('span');
+        axisLabel.textContent = axis.toUpperCase() + ':';
+        axisLabel.style.cssText = 'min-width: 30px; font-size: 0.85rem;';
+        
+        const axisSlider = document.createElement('input');
+        axisSlider.type = 'range';
+        axisSlider.min = -1;
+        axisSlider.max = 1;
+        axisSlider.step = 0.1;
+        axisSlider.value = params.direction[axis] || (axis === 'x' ? 1 : 0);
+        axisSlider.style.cssText = 'flex: 1;';
+        
+        const axisValue = document.createElement('span');
+        axisValue.textContent = axisSlider.value;
+        axisValue.style.cssText = 'min-width: 40px; text-align: right; font-family: monospace; font-size: 0.85rem;';
+        
+        axisSlider.addEventListener('input', (e) => {
+          params.direction[axis] = parseFloat(e.target.value);
+          axisValue.textContent = e.target.value;
+          this.refreshPreview();
+        });
+        
+        axisGroup.appendChild(axisLabel);
+        axisGroup.appendChild(axisSlider);
+        axisGroup.appendChild(axisValue);
+        dirGroup.appendChild(axisGroup);
+      });
+      
+      container.appendChild(dirGroup);
+    }
+    
+  }
+  
+  renderAnimationInPreviewPanel(params) {
+    // Render animation in the main preview canvas (where visualizer normally renders)
+    const previewCanvas = document.getElementById('preview-canvas');
+    if (!previewCanvas) return;
+    
+    // Use the existing preview canvas
+    const ctx = previewCanvas.getContext('2d');
+    
+    // Resize canvas to match container
+    const container = previewCanvas.parentElement;
+    previewCanvas.width = container.clientWidth;
+    previewCanvas.height = Math.min(container.clientHeight, 400);
+    let animationFrame = null;
+    const startTime = Date.now();
+    
+    // Simple hash function for noise
+    const hash = (x, y) => {
+      const h = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453;
+      return h - Math.floor(h);
+    };
+    
+    // Simple 2D noise
+    const noise = (x, y) => {
+      const ix = Math.floor(x);
+      const iy = Math.floor(y);
+      const fx = x - ix;
+      const fy = y - iy;
+      
+      const a = hash(ix, iy);
+      const b = hash(ix + 1, iy);
+      const c = hash(ix, iy + 1);
+      const d = hash(ix + 1, iy + 1);
+      
+      const ux = fx * fx * (3 - 2 * fx);
+      const uy = fy * fy * (3 - 2 * fy);
+      
+      return a * (1 - ux) * (1 - uy) + 
+             b * ux * (1 - uy) + 
+             c * (1 - ux) * uy + 
+             d * ux * uy;
+    };
+    
+    // Animate preview
+    const animate = () => {
+      const time = (Date.now() - startTime) / 1000.0 * params.speed;
+      
+      // Clear
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, previewCanvas.width, previewCanvas.height);
+      
+      // Draw pattern based on type
+      const imageData = ctx.createImageData(previewCanvas.width, previewCanvas.height);
+      
+      for (let y = 0; y < previewCanvas.height; y++) {
+        for (let x = 0; x < previewCanvas.width; x++) {
+          let value = 0;
+          
+          if (params.type === 'ripples') {
+            // Multi-octave noise
+            let amplitude = 1.0;
+            let frequency = params.scale * 0.05;
+            
+            for (let oct = 0; oct < params.octaves; oct++) {
+              const nx = x * frequency + time * 0.3 * frequency;
+              const ny = y * frequency + time * 0.2 * frequency;
+              value += noise(nx, ny) * amplitude;
+              frequency *= 2;
+              amplitude *= 0.5;
+            }
+            value = value * params.strength * 5;
+            
+          } else if (params.type === 'flow') {
+            // Directional flow
+            const nx = (x + time * 30 * params.direction.x) * params.scale * 0.05;
+            const ny = (y + time * 30 * params.direction.y) * params.scale * 0.05;
+            value = noise(nx, ny) * params.strength * 5;
+            
+          } else if (params.type === 'sway') {
+            // Sine wave sway
+            const phase = x * params.scale * 0.1 + time * params.speed * Math.PI;
+            value = Math.sin(phase) * params.strength * 5;
+            
+          } else if (params.type === 'shimmer') {
+            // Fast, subtle variation
+            const nx = x * params.scale * 0.1;
+            const ny = y * params.scale * 0.1 + time * 2;
+            value = noise(nx, ny) * params.strength * 3;
+          }
+          
+          // Map to color (blue gradient for visualization)
+          const brightness = Math.floor((value + 1) * 0.5 * 255);
+          const idx = (y * previewCanvas.width + x) * 4;
+          imageData.data[idx] = brightness * 0.2;
+          imageData.data[idx + 1] = brightness * 0.5;
+          imageData.data[idx + 2] = brightness;
+          imageData.data[idx + 3] = 255;
+        }
+      }
+      
+      ctx.putImageData(imageData, 0, 0);
+      
+      // Add text overlay
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+      ctx.font = '16px monospace';
+      ctx.fillText(`${params.type} - ${params.name}`, 12, previewCanvas.height - 12);
+      
+      animationFrame = requestAnimationFrame(animate);
+    };
+    
+    animate();
+    
+    // Cleanup on node deselection
+    const stopAnimation = () => {
+      if (animationFrame) {
+        cancelAnimationFrame(animationFrame);
+      }
+    };
+    
+    // Store cleanup function
+    if (!this.animationCleanups) {
+      this.animationCleanups = [];
+    }
+    this.animationCleanups.push(stopAnimation);
   }
 }

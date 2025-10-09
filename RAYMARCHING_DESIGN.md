@@ -228,21 +228,29 @@ fn triplanarSample(pos: vec3<f32>, normal: vec3<f32>, texture: texture_2d<f32>) 
 - GPU shader for max-pooling downsampling
 - Output 4 LOD levels (512, 128, 32, 8)
 
-### Phase 2: Export System
-- Binary export of all maps
-- JSON export of block definitions
-- Format for ray marcher consumption
+### Phase 2: Export System ✅ (Complete)
+- ✅ PNG export for heightmaps (LOD0-3)
+- ✅ PNG export for water elevation
+- ✅ PNG export for block map
+- ✅ JSON manifest with file references
+- ✅ Lossless compression (~75% size reduction)
+- ✅ Multi-file loading in world viewer
+- ✅ Backward compatible with legacy JSON format
 
-### Phase 3: Basic Ray Marcher
-- Simple single-level ray marching
-- Height-only intersection
-- Flat color from terrain blocks
-- Distance fog
+### Phase 3: Basic Ray Marcher ✅ (Complete)
+- ✅ DDA ray marching (single-level)
+- ✅ Height-only intersection
+- ✅ Block-type based coloring
+- ✅ Diffuse lighting with face normals
+- ✅ Distance fog (200-800m range)
 
-### Phase 4: Hierarchical LOD
-- Multi-level traversal
-- Air skipping optimization
-- Performance profiling
+### Phase 4: Hierarchical LOD ⚠️ (In Progress - Issues)
+- ✅ Multi-level traversal (LOD3→LOD2→LOD1→LOD0)
+- ✅ Hierarchical DDA at each LOD level
+- ✅ Air skipping with coarse LOD chunks
+- ❌ Performance: Slower than single-level DDA (overhead from LOD switching)
+- ⚠️ Visual artifacts: Striping/banding at LOD transitions
+- **Current Status**: Implementation works but provides no FPS benefit for 170m world. May be more effective for larger worlds (>1km). DDA raymarcher remains faster for current scale.
 
 ### Phase 5: Water & Transparency
 - Water surface detection

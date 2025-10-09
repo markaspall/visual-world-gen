@@ -1,0 +1,110 @@
+{
+  "seed": 1759903421473,
+  "resolution": 512,
+  "voxelSize": 0.333,
+  "blocks": [
+    {
+      "id": 0,
+      "name": "Air",
+      "color": "#000000",
+      "transparent": 1,
+      "emissive": 0,
+      "reflective": 0,
+      "refractive": 1,
+      "animationId": null
+    },
+    {
+      "id": 1,
+      "name": "Grass",
+      "color": "#45b545",
+      "transparent": 0,
+      "emissive": 0,
+      "reflective": 0,
+      "refractive": 1,
+      "animationId": null
+    },
+    {
+      "id": 2,
+      "name": "Dirt",
+      "color": "#8b5a3c",
+      "transparent": 0,
+      "emissive": 0,
+      "reflective": 0,
+      "refractive": 1,
+      "animationId": null
+    },
+    {
+      "id": 3,
+      "name": "Stone",
+      "color": "#808080",
+      "transparent": 0,
+      "emissive": 0,
+      "reflective": 0,
+      "refractive": 1,
+      "animationId": null
+    },
+    {
+      "id": 4,
+      "name": "Sand",
+      "color": "#edc9af",
+      "transparent": 0,
+      "emissive": 0,
+      "reflective": 0,
+      "refractive": 1,
+      "animationId": null
+    },
+    {
+      "id": 5,
+      "name": "Snow",
+      "color": "#ffffff",
+      "transparent": 0,
+      "emissive": 0,
+      "reflective": 0.3,
+      "refractive": 1,
+      "animationId": null
+    },
+    {
+      "id": 6,
+      "name": "Water",
+      "color": "#1e90ff",
+      "transparent": 0.8,
+      "emissive": 0,
+      "reflective": 0.2,
+      "refractive": 1.33,
+      "animationId": "node-20"
+    },
+    {
+      "id": 7,
+      "name": "Tree Seed",
+      "color": "#228b22",
+      "transparent": 0,
+      "emissive": 0,
+      "reflective": 0,
+      "refractive": 1,
+      "animationId": null
+    }
+  ],
+  "animations": {
+    "node-20": {
+      "name": "Water Ripples",
+      "type": "ripples",
+      "speed": 0.5,
+      "scale": 0.15,
+      "strength": 0.08,
+      "octaves": 3,
+      "direction": [
+        1,
+        0
+      ]
+    }
+  },
+  "files": {
+    "heightLOD0": "height_lod0.png",
+    "heightLOD1": "height_lod1.png",
+    "heightLOD2": "height_lod2.png",
+    "heightLOD3": "height_lod3.png",
+    "waterHeight": "waterHeight.png",
+    "terrainBlocks": "terrainBlocks.png",
+    "waterBlocks": "waterBlocks.png"
+  }
+}

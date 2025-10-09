@@ -307,7 +307,7 @@ body {
 }
 
 .parameter-panel.active {
-  max-height: 300px;
+  max-height: 500px;
   min-height: 120px;
   overflow-y: auto;
 }
@@ -336,10 +336,10 @@ body {
   flex: 1;
   padding: 1rem 1.5rem;
   overflow-x: auto;
-  overflow-y: hidden;
+  overflow-y: visible;
   display: flex;
   gap: 2rem;
-  align-items: center;
+  align-items: flex-start;
 }
 
 .param-hint {
