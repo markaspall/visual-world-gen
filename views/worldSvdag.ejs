@@ -263,12 +263,42 @@
       <span>Leaf Size Visualization</span>
     </label>
     <label>
+      <input type="checkbox" id="debug-performance">
+      <span>Performance (Step Count)</span>
+    </label>
+    <label>
       <input type="checkbox" id="show-terrain" checked>
       <span>Show Terrain</span>
     </label>
     <label>
       <input type="checkbox" id="show-water" checked>
       <span>Show Water</span>
+    </label>
+    
+    <h3>Performance Toggles</h3>
+    <label>
+      <input type="checkbox" id="enable-shadows" checked>
+      <span>Enable Shadows</span>
+    </label>
+    <label>
+      <input type="checkbox" id="enable-reflections" checked>
+      <span>Enable Water Reflections</span>
+    </label>
+    <label>
+      <input type="checkbox" id="enable-fog" checked>
+      <span>Enable Atmospheric Fog</span>
+    </label>
+    <label>
+      <input type="checkbox" id="enable-early-exit" checked>
+      <span>Early Sky Exit (Optimization)</span>
+    </label>
+    <label>
+      <input type="checkbox" id="enable-water-animation" checked>
+      <span>Water Wave Animation</span>
+    </label>
+    <label>
+      <input type="checkbox" id="increase-shadow-bias">
+      <span>Fix Shadow Acne (High Bias)</span>
     </label>
   </div>
   
@@ -309,17 +339,23 @@
       document.getElementById('direction').textContent = `${(rot[0] * 180 / Math.PI).toFixed(0)}°, ${(rot[1] * 180 / Math.PI).toFixed(0)}°`;
     }
     
-    // Set canvas size
+    // Set canvas size with render scale (0.5 = half resolution for 4× faster rendering)
+    const RENDER_SCALE = 0.75; // Adjust: 0.5 = 4× faster, 0.75 = 2× faster, 1.0 = native
+    
     function resizeCanvas() {
-      canvas.width = window.innerWidth;
-      canvas.height = window.innerHeight;
+      canvas.width = Math.floor(window.innerWidth * RENDER_SCALE);
+      canvas.height = Math.floor(window.innerHeight * RENDER_SCALE);
+      canvas.style.width = window.innerWidth + 'px';
+      canvas.style.height = window.innerHeight + 'px';
       if (window.renderer) {
         window.renderer.resize();
       }
     }
     
-    canvas.width = window.innerWidth;
-    canvas.height = window.innerHeight;
+    canvas.width = Math.floor(window.innerWidth * RENDER_SCALE);
+    canvas.height = Math.floor(window.innerHeight * RENDER_SCALE);
+    canvas.style.width = window.innerWidth + 'px';
+    canvas.style.height = window.innerHeight + 'px';
     window.addEventListener('resize', resizeCanvas);
     
     // Debug panel toggle
@@ -420,10 +456,30 @@
           document.getElementById('debug-distance').checked = false;
           document.getElementById('debug-normals').checked = false;
           document.getElementById('debug-dag-levels').checked = false;
+          document.getElementById('debug-performance').checked = false;
           renderer.debugFlags.debugStepCount = false;
           renderer.debugFlags.debugDistance = false;
           renderer.debugFlags.debugNormals = false;
           renderer.debugFlags.debugDAGLevels = false;
+          renderer.debugFlags.debugPerformance = false;
+        }
+      });
+      
+      document.getElementById('debug-performance').addEventListener('change', (e) => {
+        renderer.debugFlags.debugPerformance = e.target.checked;
+        if (e.target.checked) {
+          document.getElementById('debug-step-count').checked = false;
+          document.getElementById('debug-distance').checked = false;
+          document.getElementById('debug-normals').checked = false;
+          document.getElementById('debug-dag-levels').checked = false;
+          document.getElementById('debug-leaf-size').checked = false;
+          document.getElementById('debug-flat-colors').checked = false;
+          renderer.debugFlags.debugStepCount = false;
+          renderer.debugFlags.debugDistance = false;
+          renderer.debugFlags.debugNormals = false;
+          renderer.debugFlags.debugDAGLevels = false;
+          renderer.debugFlags.debugLeafSize = false;
+          renderer.debugFlags.debugWaterValues = false;
         }
       });
       
@@ -433,6 +489,30 @@
       
       document.getElementById('show-water').addEventListener('change', (e) => {
         renderer.debugFlags.showWater = e.target.checked;
+      });
+      
+      document.getElementById('enable-shadows').addEventListener('change', (e) => {
+        renderer.perfFlags.enableShadows = e.target.checked;
+      });
+      
+      document.getElementById('enable-reflections').addEventListener('change', (e) => {
+        renderer.perfFlags.enableReflections = e.target.checked;
+      });
+      
+      document.getElementById('enable-fog').addEventListener('change', (e) => {
+        renderer.perfFlags.enableFog = e.target.checked;
+      });
+      
+      document.getElementById('enable-early-exit').addEventListener('change', (e) => {
+        renderer.perfFlags.enableEarlyExit = e.target.checked;
+      });
+      
+      document.getElementById('enable-water-animation').addEventListener('change', (e) => {
+        renderer.perfFlags.enableWaterAnimation = e.target.checked;
+      });
+      
+      document.getElementById('increase-shadow-bias').addEventListener('change', (e) => {
+        renderer.perfFlags.increaseShadowBias = e.target.checked;
       });
       
       // Camera controls

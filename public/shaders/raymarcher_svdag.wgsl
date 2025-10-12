@@ -22,8 +22,16 @@ struct Camera {
   debugNormals: f32,
   debugDAGLevels: f32,
   debugLeafSize: f32,
-  _pad5: f32,
+  debugPerformance: f32,
   _pad6: f32,
+  enableShadows: f32,
+  enableReflections: f32,
+  enableFog: f32,
+  enableEarlyExit: f32,
+  enableWaterAnimation: f32,
+  increaseShadowBias: f32,
+  _pad7: f32,
+  _pad8: f32,
 }
 
 struct SVDAGParams {
@@ -100,8 +108,8 @@ struct StackEntry {
 const VOXEL_SIZE = 0.333333;
 const WORLD_VOXELS = 512.0;
 const PI = 3.14159265359;
-const MAX_STACK_DEPTH = 16;
-const MAX_STEPS = 1024;
+const MAX_STACK_DEPTH = 12;  // Reduced from 16 (depth 8 needs max 9 levels)
+const MAX_STEPS = 256;  // Reduced from 1024 for better performance
 const EPSILON = 0.0001;
 
 // ============================================================================
@@ -409,6 +417,9 @@ fn raymarchSVDAG(ray_origin: vec3<f32>, ray_dir: vec3<f32>) -> Hit {
   hit.position = vec3<f32>(0.0);
   hit.normal = vec3<f32>(0.0, 1.0, 0.0);
   
+  // PRE-COMPUTE inverse ray direction once (MAJOR OPTIMIZATION)
+  let inv_ray_dir = 1.0 / ray_dir;
+  
   let world_half = svdag_params.world_size * 0.5;
   let world_center = vec3<f32>(world_half);
   let world_min = vec3<f32>(0.0);
@@ -474,24 +485,37 @@ fn raymarchSVDAG(ray_origin: vec3<f32>, ray_dir: vec3<f32>) -> Hit {
       if (hit.block_id == 0u) {
         hit.block_id = 1u; // Temporary: force to grass to see structure
       }
+      
+      // Fast path: Only check toggles if at least one is disabled
+      if (camera.showTerrain < 0.5 || camera.showWater < 0.5) {
+        let material = getMaterial(hit.block_id);
+        let isWater = material.transparent > 0.5;
+        let isEnabled = (isWater && camera.showWater > 0.5) || (!isWater && camera.showTerrain > 0.5);
+        
+        if (!isEnabled) {
+          // Skip this block and continue traversal
+          continue;
+        }
+      }
+      
       hit.position = ray_origin + ray_dir * current_t;
       hit.distance = current_t;
       hit.dag_depth = MAX_STACK_DEPTH - stack_ptr;
       hit.node_size = node_size;  // Store leaf size for visualization
       
-      // Calculate normal based on which face of the voxel AABB the ray entered
+      // Calculate normal by determining which AABB face the ray entered
       let node_min = node_center - vec3<f32>(node_size * 0.5);
       let node_max = node_center + vec3<f32>(node_size * 0.5);
       
-      // Re-intersect the AABB to find entry point
-      let t_min = (node_min - ray_origin) / ray_dir;
-      let t_max = (node_max - ray_origin) / ray_dir;
-      let t_near = min(t_min, t_max);
-      let t_far = max(t_min, t_max);
+      // Use pre-computed inv_ray_dir for AABB intersection
+      let t0 = (node_min - ray_origin) * inv_ray_dir;
+      let t1 = (node_max - ray_origin) * inv_ray_dir;
+      let t_near = min(t0, t1);
+      let t_far = max(t0, t1);
       let t_entry = max(max(t_near.x, t_near.y), t_near.z);
       
       // Determine which component gave us the entry point
-      let epsilon = 0.0001;
+      let epsilon = 0.001;
       if (abs(t_entry - t_near.x) < epsilon) {
         hit.normal = vec3<f32>(-sign(ray_dir.x), 0.0, 0.0);
       } else if (abs(t_entry - t_near.y) < epsilon) {
@@ -539,10 +563,16 @@ fn raymarchSVDAG(ray_origin: vec3<f32>, ray_dir: vec3<f32>) -> Hit {
         let child_min = child_center - vec3<f32>(child_half);
         let child_max = child_center + vec3<f32>(child_half);
         
-        let child_hit = intersectAABB(ray_origin, ray_dir, child_min, child_max);
+        // OPTIMIZED: Inline AABB intersection with pre-computed inv_ray_dir
+        let t0 = (child_min - ray_origin) * inv_ray_dir;
+        let t1 = (child_max - ray_origin) * inv_ray_dir;
+        let tmin_vec = min(t0, t1);
+        let tmax_vec = max(t0, t1);
+        let child_tmin = max(max(tmin_vec.x, tmin_vec.y), tmin_vec.z);
+        let child_tmax = min(min(tmax_vec.x, tmax_vec.y), tmax_vec.z);
         
-        if (child_hit.x <= child_hit.y && child_hit.y >= current_t) {
-          let child_t = max(child_hit.x, current_t);
+        if (child_tmin <= child_tmax && child_tmax >= current_t) {
+          let child_t = max(child_tmin, current_t);
           
           if (stack_ptr + 1 < MAX_STACK_DEPTH) {
             stack_ptr += 1;
@@ -616,7 +646,7 @@ fn traceReflectionSVDAG(ray_origin: vec3<f32>, ray_dir: vec3<f32>) -> vec3<f32> 
 // MAIN COMPUTE SHADER
 // ============================================================================
 
-@compute @workgroup_size(8, 8)
+@compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let texSize = textureDimensions(outputTexture);
   let pixelCoord = global_id.xy;
@@ -635,8 +665,40 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     camera.up * ndc.y * tan(camera.fov * 0.5)
   );
   
+  // Early world bounds check - skip traversal for rays that miss entirely
+  let world_min = vec3<f32>(0.0);
+  let world_max = vec3<f32>(svdag_params.world_size);
+  let inv_dir = 1.0 / rayDir;
+  let t0_world = (world_min - camera.position) * inv_dir;
+  let t1_world = (world_max - camera.position) * inv_dir;
+  let tmin_world = min(t0_world, t1_world);
+  let tmax_world = max(t0_world, t1_world);
+  let t_near_world = max(max(tmin_world.x, tmin_world.y), tmin_world.z);
+  let t_far_world = min(min(tmax_world.x, tmax_world.y), tmax_world.z);
+  
+  // Fast path: ray misses world entirely - output sky immediately (if enabled)
+  if (camera.enableEarlyExit > 0.5 && (t_near_world > t_far_world || t_far_world < 0.0)) {
+    let sunDir = getSunDirection(timeParams.timeOfDay);
+    let skyColor = getSkyColor(rayDir, sunDir);
+    textureStore(outputTexture, pixelCoord, vec4<f32>(skyColor, 1.0));
+    return;
+  }
+  
   // Raymarch SVDAG
   let hit = raymarchSVDAG(camera.position, rayDir);
+  
+  // PURE PERFORMANCE MODE - Absolute minimum rendering
+  // Only traversal, no material lookups, no normal calc (uses default normal)
+  if (camera.debugPerformance > 0.5) {
+    if (hit.block_id > 0u) {
+      // Hit solid geometry - output green
+      textureStore(outputTexture, pixelCoord, vec4<f32>(0.0, 1.0, 0.0, 1.0));
+    } else {
+      // Miss - output blue sky
+      textureStore(outputTexture, pixelCoord, vec4<f32>(0.5, 0.7, 1.0, 1.0));
+    }
+    return;
+  }
   
   // Debug modes (work even without valid hits)
   if (camera.debugStepCount > 0.5) {
@@ -687,21 +749,21 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     return;
   }
   
-  // Flat color debug mode - show pure material colors with basic lighting
+  // Flat color debug mode - FAST pure material colors with simple lighting
+  // This is the performance baseline - no shadows, no reflections, no water effects
   if (camera.debugWaterValues > 0.5) {
     if (hit.block_id > 0u) {
       let material = getMaterial(hit.block_id);
       var flatColor = vec3<f32>(material.colorR, material.colorG, material.colorB);
       
-      // Add simple lighting based on normal (so we can see faces)
+      // Simple directional lighting (no shadow rays)
       let sunDir = normalize(vec3<f32>(0.5, 1.0, 0.3));
-      let light = max(dot(hit.normal, sunDir), 0.2); // Ambient 0.2
+      let light = max(dot(hit.normal, sunDir), 0.3); // Ambient 0.3
       flatColor = flatColor * light;
       
       textureStore(outputTexture, pixelCoord, vec4<f32>(flatColor, 1.0));
     } else {
-      // Show magenta for missing geometry in flat color mode only
-      textureStore(outputTexture, pixelCoord, vec4<f32>(1.0, 0.0, 1.0, 1.0));
+      textureStore(outputTexture, pixelCoord, vec4<f32>(0.5, 0.7, 1.0, 1.0)); // Sky blue
     }
     return;
   }
@@ -723,8 +785,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       if (camera.showWater > 0.5) {
         var waterSurfaceNormal = vec3<f32>(0.0, 1.0, 0.0);
         
-        // Apply animation if assigned
-        if (material.animationId >= 0.0) {
+        // Apply animation if assigned and enabled
+        if (camera.enableWaterAnimation > 0.5 && material.animationId >= 0.0) {
           let animIndex = i32(material.animationId);
           if (animIndex < i32(arrayLength(&animations))) {
             let anim = animations[animIndex];
@@ -732,21 +794,30 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
           }
         }
         
-        // Fresnel for water surface
-        let viewDir = -rayDir;
-        let cosTheta = abs(dot(viewDir, waterSurfaceNormal));
-        let fresnel = fresnelSchlick(cosTheta, 1.0, 1.33);
-        
-        // Trace reflection
-        let reflectDir = reflect(rayDir, waterSurfaceNormal);
-        let reflectionColor = traceReflectionSVDAG(hit.position + reflectDir * 0.1, reflectDir);
-        
-        // Blend water color with reflection
+        // Water rendering with optional reflections
         let waterColor = baseColor * 0.3; // Darken water color
-        color = mix(waterColor, reflectionColor, fresnel);
         
-        // Apply fog
-        color = applyFog(color, hit.distance, rayDir, sunDir);
+        if (camera.enableReflections > 0.5) {
+          // Fresnel for water surface
+          let viewDir = -rayDir;
+          let cosTheta = abs(dot(viewDir, waterSurfaceNormal));
+          let fresnel = fresnelSchlick(cosTheta, 1.0, 1.33);
+          
+          // Trace reflection
+          let reflectDir = reflect(rayDir, waterSurfaceNormal);
+          let reflectionColor = traceReflectionSVDAG(hit.position + reflectDir * 0.1, reflectDir);
+          
+          // Blend water color with reflection
+          color = mix(waterColor, reflectionColor, fresnel);
+        } else {
+          // Simple water color without reflections
+          color = waterColor;
+        }
+        
+        // Apply fog (toggleable)
+        if (camera.enableFog > 0.5) {
+          color = applyFog(color, hit.distance, rayDir, sunDir);
+        }
       } else {
         // Water disabled, show sky
         color = getSkyColor(rayDir, sunDir);
@@ -757,9 +828,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         // Lighting
         let diffuse = max(dot(hit.normal, sunDir), 0.0);
         
-        // Soft shadows
+        // Soft shadows (toggleable)
         var shadow = 1.0;
-        shadow = softShadowSVDAG(hit.position + hit.normal * 0.1, sunDir);
+        if (camera.enableShadows > 0.5) {
+          // Adjustable shadow bias to fix shadow acne
+          let shadowBias = select(0.1, 0.5, camera.increaseShadowBias > 0.5);
+          shadow = softShadowSVDAG(hit.position + hit.normal * shadowBias, sunDir);
+        }
         
         // Ambient lighting based on time of day
         let sunElevation = sunDir.y;
@@ -785,8 +860,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
           finalColor = mix(finalColor, baseColor, material.emissive);
         }
         
-        // Apply atmospheric fog
-        finalColor = applyFog(finalColor, hit.distance, rayDir, sunDir);
+        // Apply atmospheric fog (toggleable)
+        if (camera.enableFog > 0.5) {
+          finalColor = applyFog(finalColor, hit.distance, rayDir, sunDir);
+        }
         
         color = finalColor;
       } else {

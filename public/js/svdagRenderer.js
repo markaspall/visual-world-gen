@@ -182,7 +182,17 @@ export class SvdagRenderer {
       debugDistance: false,
       debugNormals: false,
       debugDAGLevels: false,
-      debugLeafSize: false
+      debugLeafSize: false,
+      debugPerformance: false
+    };
+    
+    this.perfFlags = {
+      enableShadows: true,
+      enableReflections: true,
+      enableFog: true,
+      enableEarlyExit: true,
+      enableWaterAnimation: true,
+      increaseShadowBias: false
     };
     
     this.time = 0;
@@ -610,6 +620,15 @@ export class SvdagRenderer {
       this.debugFlags.debugNormals ? 1.0 : 0.0,
       this.debugFlags.debugDAGLevels ? 1.0 : 0.0,
       this.debugFlags.debugLeafSize ? 1.0 : 0.0,
+      this.debugFlags.debugPerformance ? 1.0 : 0.0,
+      0,
+      // Performance flags
+      this.perfFlags.enableShadows ? 1.0 : 0.0,
+      this.perfFlags.enableReflections ? 1.0 : 0.0,
+      this.perfFlags.enableFog ? 1.0 : 0.0,
+      this.perfFlags.enableEarlyExit ? 1.0 : 0.0,
+      this.perfFlags.enableWaterAnimation ? 1.0 : 0.0,
+      this.perfFlags.increaseShadowBias ? 1.0 : 0.0,
       0, 0
     ]);
     
@@ -646,8 +665,8 @@ export class SvdagRenderer {
     computePass.setPipeline(this.computePipeline);
     computePass.setBindGroup(0, this.computeBindGroup);
     computePass.dispatchWorkgroups(
-      Math.ceil(this.canvas.width / 8),
-      Math.ceil(this.canvas.height / 8)
+      Math.ceil(this.canvas.width / 16),
+      Math.ceil(this.canvas.height / 16)
     );
     computePass.end();
     
@@ -669,8 +688,11 @@ export class SvdagRenderer {
     
     // Log once on first render
     if (!this._loggedRender) {
-      console.log('First render completed. Workgroups:', 
-        Math.ceil(this.canvas.width / 8), 'x', Math.ceil(this.canvas.height / 8));
+      console.log('First render completed.');
+      console.log('Resolution:', this.canvas.width, 'x', this.canvas.height, '=', this.canvas.width * this.canvas.height, 'pixels');
+      console.log('Workgroups:', 
+        Math.ceil(this.canvas.width / 16), 'x', Math.ceil(this.canvas.height / 16), '=',
+        Math.ceil(this.canvas.width / 16) * Math.ceil(this.canvas.height / 16), 'groups');
       this._loggedRender = true;
     }
   }
