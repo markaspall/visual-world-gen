@@ -1,0 +1,539 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SVDAG Renderer - <%= worldId %></title>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      font-family: 'Consolas', 'Monaco', monospace;
+      background: #1a1a1a;
+    }
+    
+    #canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+    }
+    
+    #info {
+      position: absolute;
+      top: 20px;
+      left: 20px;
+      background: rgba(0, 0, 0, 0.8);
+      color: #fff;
+      padding: 15px 20px;
+      border-radius: 8px;
+      font-size: 13px;
+      line-height: 1.6;
+      pointer-events: none;
+      backdrop-filter: blur(10px);
+    }
+    
+    #info h3 {
+      margin: 0 0 10px 0;
+      font-size: 16px;
+      color: #FF9800;
+    }
+    
+    #info .stat {
+      display: flex;
+      justify-content: space-between;
+      gap: 20px;
+      margin: 5px 0;
+    }
+    
+    #info .label {
+      color: #888;
+    }
+    
+    #info .value {
+      color: #fff;
+      font-weight: bold;
+    }
+    
+    #info .building {
+      color: #FF9800;
+      animation: pulse 1.5s ease-in-out infinite;
+    }
+    
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+    
+    #controls {
+      position: absolute;
+      bottom: 20px;
+      left: 20px;
+      background: rgba(0, 0, 0, 0.8);
+      color: #fff;
+      padding: 15px 20px;
+      border-radius: 8px;
+      font-size: 12px;
+      pointer-events: none;
+      backdrop-filter: blur(10px);
+    }
+    
+    #controls h4 {
+      margin: 0 0 10px 0;
+      font-size: 14px;
+      color: #2196F3;
+    }
+    
+    #toggle-btns {
+      position: absolute;
+      top: 20px;
+      right: 20px;
+      display: flex;
+      gap: 10px;
+    }
+    
+    .toggle-btn {
+      background: #FF9800;
+      color: white;
+      border: none;
+      padding: 12px 24px;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: bold;
+      cursor: pointer;
+      font-family: inherit;
+      box-shadow: 0 4px 12px rgba(255, 152, 0, 0.3);
+      transition: all 0.2s;
+    }
+    
+    .toggle-btn:hover {
+      background: #F57C00;
+      transform: translateY(-2px);
+      box-shadow: 0 6px 16px rgba(255, 152, 0, 0.4);
+    }
+    
+    .toggle-btn:active {
+      transform: translateY(0);
+    }
+    
+    .toggle-btn.secondary {
+      background: #2196F3;
+      box-shadow: 0 4px 12px rgba(33, 150, 243, 0.3);
+    }
+    
+    .toggle-btn.secondary:hover {
+      background: #1976D2;
+      box-shadow: 0 6px 16px rgba(33, 150, 243, 0.4);
+    }
+    
+    .fps-counter {
+      color: #FF9800;
+      font-weight: bold;
+      font-size: 18px;
+    }
+    
+    #debug-panel {
+      position: absolute;
+      top: 20px;
+      right: 20px;
+      background: rgba(0, 0, 0, 0.8);
+      color: #fff;
+      padding: 15px 20px;
+      border-radius: 8px;
+      font-size: 12px;
+      backdrop-filter: blur(10px);
+      max-width: 250px;
+      display: none;
+    }
+    
+    #debug-panel h4 {
+      margin: 0 0 10px 0;
+      font-size: 14px;
+      color: #FF9800;
+    }
+    
+    #debug-panel label {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin: 8px 0;
+      cursor: pointer;
+      user-select: none;
+    }
+    
+    #debug-panel input[type="checkbox"] {
+      cursor: pointer;
+    }
+    
+    #debug-toggle {
+      position: absolute;
+      top: 80px;
+      right: 20px;
+      background: rgba(0, 0, 0, 0.8);
+      color: #FF9800;
+      border: 1px solid #FF9800;
+      padding: 8px 16px;
+      border-radius: 6px;
+      font-size: 12px;
+      cursor: pointer;
+      font-family: inherit;
+      transition: all 0.2s;
+    }
+    
+    #debug-toggle:hover {
+      background: rgba(255, 152, 0, 0.2);
+    }
+  </style>
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+  
+  <div id="info">
+    <h3>🌳 SVDAG Raymarcher</h3>
+    <div class="stat">
+      <span class="label">FPS:</span>
+      <span class="value fps-counter" id="fps">--</span>
+    </div>
+    <div class="stat">
+      <span class="label">SVDAG Nodes:</span>
+      <span class="value" id="nodes">--</span>
+    </div>
+    <div class="stat">
+      <span class="label">SVDAG Leaves:</span>
+      <span class="value" id="leaves">--</span>
+    </div>
+    <div class="stat">
+      <span class="label">Build Time:</span>
+      <span class="value" id="buildTime">--</span>
+    </div>
+    <div class="stat">
+      <span class="label">Compression:</span>
+      <span class="value" id="compression">--</span>
+    </div>
+    <div class="stat">
+      <span class="label">Position:</span>
+      <span class="value" id="position">--</span>
+    </div>
+    <div class="stat">
+      <span class="label">Direction:</span>
+      <span class="value" id="direction">--</span>
+    </div>
+  </div>
+  
+  <div id="controls">
+    <h4>📋 Controls</h4>
+    <p><strong>W/A/S/D</strong> – Move</p>
+    <p><strong>Space/Shift</strong> – Up/Down</p>
+    <p><strong>Mouse</strong> – Look around</p>
+    <p><strong>Esc</strong> – Release pointer</p>
+    <p><strong>G</strong> – Toggle debug panel</p>
+  </div>
+  
+  <div id="toggle-btns">
+    <button class="toggle-btn secondary" onclick="location.href='/worlds/<%= worldId %>'">← DDA Raymarcher</button>
+    <button class="toggle-btn secondary" onclick="location.href='/worlds/<%= worldId %>/mesh'">Mesh Renderer →</button>
+  </div>
+  
+  <button id="debug-toggle">🐛 Toggle Debug</button>
+  
+  <div id="debug-panel">
+    <h4>🐛 Debug Modes</h4>
+    <label>
+      <input type="checkbox" id="debug-flat-colors">
+      <span>Flat Colors (No Lighting)</span>
+    </label>
+    <label>
+      <input type="checkbox" id="debug-step-count">
+      <span>Step Count Heatmap</span>
+    </label>
+    <label>
+      <input type="checkbox" id="debug-distance">
+      <span>Distance Heatmap</span>
+    </label>
+    <label>
+      <input type="checkbox" id="debug-normals">
+      <span>Normals Visualization</span>
+    </label>
+    <label>
+      <input type="checkbox" id="debug-dag-levels">
+      <span>DAG Depth Heatmap</span>
+    </label>
+    <label>
+      <input type="checkbox" id="debug-leaf-size">
+      <span>Leaf Size Visualization</span>
+    </label>
+    <label>
+      <input type="checkbox" id="show-terrain" checked>
+      <span>Show Terrain</span>
+    </label>
+    <label>
+      <input type="checkbox" id="show-water" checked>
+      <span>Show Water</span>
+    </label>
+  </div>
+  
+  <script type="module">
+    import { SvdagRenderer } from '/js/svdagRenderer.js';
+    
+    const canvas = document.getElementById('canvas');
+    const worldId = '<%= worldId %>';
+    
+    // FPS counter
+    let frameCount = 0;
+    let lastTime = performance.now();
+    let fps = 0;
+    
+    function updateFPS() {
+      frameCount++;
+      const currentTime = performance.now();
+      if (currentTime - lastTime >= 1000) {
+        fps = Math.round(frameCount * 1000 / (currentTime - lastTime));
+        document.getElementById('fps').textContent = fps;
+        frameCount = 0;
+        lastTime = currentTime;
+      }
+    }
+    
+    // Update info display
+    function updateInfo(renderer) {
+      if (renderer.svdag) {
+        document.getElementById('nodes').textContent = renderer.svdag.stats.totalNodes.toLocaleString();
+        document.getElementById('leaves').textContent = renderer.svdag.stats.totalLeaves.toLocaleString();
+        document.getElementById('buildTime').textContent = `${renderer.svdag.stats.buildTimeMs}ms`;
+        document.getElementById('compression').textContent = `${(parseFloat(renderer.svdag.stats.compressionRatio) * 100).toFixed(1)}%`;
+      }
+      
+      const pos = renderer.camera.position;
+      const rot = renderer.camera.rotation;
+      document.getElementById('position').textContent = `${pos[0].toFixed(1)}, ${pos[1].toFixed(1)}, ${pos[2].toFixed(1)}`;
+      document.getElementById('direction').textContent = `${(rot[0] * 180 / Math.PI).toFixed(0)}°, ${(rot[1] * 180 / Math.PI).toFixed(0)}°`;
+    }
+    
+    // Set canvas size
+    function resizeCanvas() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+      if (window.renderer) {
+        window.renderer.resize();
+      }
+    }
+    
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    window.addEventListener('resize', resizeCanvas);
+    
+    // Debug panel toggle
+    const debugPanel = document.getElementById('debug-panel');
+    const debugToggle = document.getElementById('debug-toggle');
+    let debugPanelVisible = false;
+    
+    debugToggle.addEventListener('click', () => {
+      debugPanelVisible = !debugPanelVisible;
+      debugPanel.style.display = debugPanelVisible ? 'block' : 'none';
+      debugToggle.textContent = debugPanelVisible ? '🐛 Hide Debug' : '🐛 Show Debug';
+    });
+    
+    // Load world data and initialize renderer
+    console.log('Loading world:', worldId);
+    
+    // Show building message
+    document.getElementById('nodes').innerHTML = '<span class="building">⏳ Building SVDAG...</span>';
+    document.getElementById('leaves').innerHTML = '<span class="building">Please wait</span>';
+    
+    try {
+      const response = await fetch(`/api/worlds/${worldId}`);
+      const worldData = await response.json();
+      
+      console.log('World data loaded:', worldData);
+      
+      // Initialize SVDAG renderer
+      const renderer = new SvdagRenderer(canvas);
+      window.renderer = renderer;
+      await renderer.initialize(worldData);
+      
+      console.log('SVDAG renderer initialized!');
+      console.log('SVDAG stats:', renderer.svdag.stats);
+      
+      // Update info panel
+      updateInfo(renderer);
+      
+      // Setup debug checkboxes
+      document.getElementById('debug-flat-colors').addEventListener('change', (e) => {
+        renderer.debugFlags.debugWaterValues = e.target.checked; // Repurpose this flag
+      });
+      
+      document.getElementById('debug-step-count').addEventListener('change', (e) => {
+        renderer.debugFlags.debugStepCount = e.target.checked;
+        if (e.target.checked) {
+          // Uncheck others
+          document.getElementById('debug-distance').checked = false;
+          document.getElementById('debug-normals').checked = false;
+          document.getElementById('debug-dag-levels').checked = false;
+          renderer.debugFlags.debugDistance = false;
+          renderer.debugFlags.debugNormals = false;
+          renderer.debugFlags.debugDAGLevels = false;
+        }
+      });
+      
+      document.getElementById('debug-distance').addEventListener('change', (e) => {
+        renderer.debugFlags.debugDistance = e.target.checked;
+        if (e.target.checked) {
+          document.getElementById('debug-step-count').checked = false;
+          document.getElementById('debug-normals').checked = false;
+          document.getElementById('debug-dag-levels').checked = false;
+          renderer.debugFlags.debugStepCount = false;
+          renderer.debugFlags.debugNormals = false;
+          renderer.debugFlags.debugDAGLevels = false;
+        }
+      });
+      
+      document.getElementById('debug-normals').addEventListener('change', (e) => {
+        renderer.debugFlags.debugNormals = e.target.checked;
+        if (e.target.checked) {
+          document.getElementById('debug-step-count').checked = false;
+          document.getElementById('debug-distance').checked = false;
+          document.getElementById('debug-dag-levels').checked = false;
+          renderer.debugFlags.debugStepCount = false;
+          renderer.debugFlags.debugDistance = false;
+          renderer.debugFlags.debugDAGLevels = false;
+        }
+      });
+      
+      document.getElementById('debug-dag-levels').addEventListener('change', (e) => {
+        renderer.debugFlags.debugDAGLevels = e.target.checked;
+        if (e.target.checked) {
+          document.getElementById('debug-step-count').checked = false;
+          document.getElementById('debug-distance').checked = false;
+          document.getElementById('debug-normals').checked = false;
+          document.getElementById('debug-leaf-size').checked = false;
+          renderer.debugFlags.debugStepCount = false;
+          renderer.debugFlags.debugDistance = false;
+          renderer.debugFlags.debugNormals = false;
+          renderer.debugFlags.debugLeafSize = false;
+        }
+      });
+      
+      document.getElementById('debug-leaf-size').addEventListener('change', (e) => {
+        renderer.debugFlags.debugLeafSize = e.target.checked;
+        if (e.target.checked) {
+          document.getElementById('debug-step-count').checked = false;
+          document.getElementById('debug-distance').checked = false;
+          document.getElementById('debug-normals').checked = false;
+          document.getElementById('debug-dag-levels').checked = false;
+          renderer.debugFlags.debugStepCount = false;
+          renderer.debugFlags.debugDistance = false;
+          renderer.debugFlags.debugNormals = false;
+          renderer.debugFlags.debugDAGLevels = false;
+        }
+      });
+      
+      document.getElementById('show-terrain').addEventListener('change', (e) => {
+        renderer.debugFlags.showTerrain = e.target.checked;
+      });
+      
+      document.getElementById('show-water').addEventListener('change', (e) => {
+        renderer.debugFlags.showWater = e.target.checked;
+      });
+      
+      // Camera controls
+      const keys = {};
+      let pointerLocked = false;
+      
+      window.addEventListener('keydown', (e) => {
+        keys[e.key.toLowerCase()] = true;
+        if (e.key === 'Escape') {
+          document.exitPointerLock();
+        }
+        if (e.key === 'g' || e.key === 'G') {
+          debugPanelVisible = !debugPanelVisible;
+          debugPanel.style.display = debugPanelVisible ? 'block' : 'none';
+          debugToggle.textContent = debugPanelVisible ? '🐛 Hide Debug' : '🐛 Show Debug';
+        }
+      });
+      
+      window.addEventListener('keyup', (e) => {
+        keys[e.key.toLowerCase()] = false;
+      });
+      
+      canvas.addEventListener('click', () => {
+        if (!pointerLocked) {
+          canvas.requestPointerLock();
+        }
+      });
+      
+      document.addEventListener('pointerlockchange', () => {
+        pointerLocked = document.pointerLockElement === canvas;
+      });
+      
+      document.addEventListener('mousemove', (e) => {
+        if (!pointerLocked) return;
+        renderer.camera.rotation[0] += e.movementX * renderer.camera.mouseSensitivity;
+        renderer.camera.rotation[1] = Math.max(-Math.PI/2, Math.min(Math.PI/2, 
+          renderer.camera.rotation[1] - e.movementY * renderer.camera.mouseSensitivity));
+      });
+      
+      // Animation loop
+      function animate() {
+        requestAnimationFrame(animate);
+        
+        const dt = 1 / 60;
+        const yaw = renderer.camera.rotation[0];
+        const pitch = renderer.camera.rotation[1];
+        
+        const forward = [
+          Math.sin(yaw) * Math.cos(pitch),
+          Math.sin(pitch),
+          Math.cos(yaw) * Math.cos(pitch)
+        ];
+        
+        const right = [
+          Math.cos(yaw),
+          0,
+          -Math.sin(yaw)
+        ];
+        
+        const speed = renderer.camera.speed * dt;
+        
+        if (keys['w']) {
+          renderer.camera.position[0] += forward[0] * speed;
+          renderer.camera.position[1] += forward[1] * speed;
+          renderer.camera.position[2] += forward[2] * speed;
+        }
+        if (keys['s']) {
+          renderer.camera.position[0] -= forward[0] * speed;
+          renderer.camera.position[1] -= forward[1] * speed;
+          renderer.camera.position[2] -= forward[2] * speed;
+        }
+        if (keys['a']) {
+          renderer.camera.position[0] -= right[0] * speed;
+          renderer.camera.position[2] -= right[2] * speed;
+        }
+        if (keys['d']) {
+          renderer.camera.position[0] += right[0] * speed;
+          renderer.camera.position[2] += right[2] * speed;
+        }
+        if (keys[' ']) {
+          renderer.camera.position[1] += speed;
+        }
+        if (keys['shift']) {
+          renderer.camera.position[1] -= speed;
+        }
+        
+        renderer.render();
+        updateFPS();
+        updateInfo(renderer);
+      }
+      
+      animate();
+      
+    } catch (error) {
+      console.error('Failed to initialize SVDAG renderer:', error);
+      document.getElementById('info').innerHTML = `
+        <h3 style="color: #f44336;">❌ Error</h3>
+        <p>${error.message}</p>
+        <p style="color: #888; font-size: 11px;">${error.stack}</p>
+      `;
+    }
+  </script>
+</body>
+</html>

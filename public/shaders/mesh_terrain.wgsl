@@ -24,8 +24,18 @@ struct TimeParams {
   fogDensity: f32,     // Exponential fog strength
 }
 
+struct AnimationParams {
+  waveFrequency: f32,  // Actually 'scale' from editor (0.15)
+  waveAmplitude: f32,  // Actually 'strength' from editor (0.08)
+  waveSpeed: f32,      // 'speed' from editor (0.5)
+  wavePhase: f32,      // phase offset
+}
+
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(0) @binding(1) var<uniform> timeParams: TimeParams;
+@group(0) @binding(2) var shadowMap: texture_depth_2d;
+@group(0) @binding(3) var shadowSampler: sampler_comparison;
+@group(0) @binding(4) var<uniform> animParams: AnimationParams;
 
 // ===================================
 // VERTEX SHADER
@@ -50,12 +60,42 @@ struct VertexOutput {
 fn vertexMain(in: VertexInput) -> VertexOutput {
   var out: VertexOutput;
   
+  var position = in.position;
+  
+  // Check if this vertex is water (high bit set in materialId)
+  let isWater = (in.materialId & 0x80000000u) != 0u;
+  
+  // Apply water animation (sine wave) - Using editor parameters!
+  if (isWater) {
+    // Animation parameters from SurfaceAnimation node (matches ray marcher)
+    // animParams: [scale, strength, speed, phase]
+    let scale = animParams.waveFrequency;    // Editor's 'scale' (0.15)
+    let strength = animParams.waveAmplitude; // Editor's 'strength' (0.08)
+    let speed = animParams.waveSpeed;        // Editor's 'speed' (0.5)
+    let phase = animParams.wavePhase;
+    
+    // Convert to wave frequency (scale affects wavelength)
+    let freq = scale * 20.0; // scale=0.15 -> freq=3.0
+    
+    // Two overlapping sine waves for natural water motion
+    let wave1 = sin(position.x * freq + timeParams.time * speed * 2.0 + phase);
+    let wave2 = cos(position.z * freq * 0.7 + timeParams.time * speed * 1.6);
+    
+    // Map waves from [-1,1] to [0,-1] so ripples only go DOWN (not above water level)
+    // This keeps the water surface at or below its designated elevation
+    let wave1Down = (wave1 - 1.0) * 0.5; // Range: -1 to 0
+    let wave2Down = (wave2 - 1.0) * 0.5; // Range: -1 to 0
+    
+    // Apply wave displacement using editor's strength value
+    position.y += (wave1Down + wave2Down) * strength;
+  }
+  
   // Transform position to clip space
-  let worldPos = vec4<f32>(in.position, 1.0);
+  let worldPos = vec4<f32>(position, 1.0);
   out.clipPosition = camera.projection * camera.view * worldPos;
   
   // Pass world position for lighting
-  out.worldPosition = in.position;
+  out.worldPosition = position;
   
   // Pass interpolated normal (already smooth from mesh builder)
   out.normal = in.normal;
@@ -70,7 +110,7 @@ fn vertexMain(in: VertexInput) -> VertexOutput {
     -(camera.view[3][0] * camera.view[0][1] + camera.view[3][1] * camera.view[1][1] + camera.view[3][2] * camera.view[2][1]),
     -(camera.view[3][0] * camera.view[0][2] + camera.view[3][1] * camera.view[1][2] + camera.view[3][2] * camera.view[2][2])
   );
-  out.viewDistance = length(cameraPos - in.position);
+  out.viewDistance = length(cameraPos - position);
   
   return out;
 }
@@ -187,6 +227,30 @@ fn applyFog(color: vec3<f32>, distance: f32, sunDir: vec3<f32>) -> vec3<f32> {
   return mix(color, fogColor, fogFactor);
 }
 
+// Calculate shadow using PCF (Percentage Closer Filtering)
+fn calculateShadow(worldPos: vec3<f32>, normal: vec3<f32>, sunDir: vec3<f32>) -> f32 {
+  // Simple shadow mapping approach:
+  // For now, use a simple distance-based soft shadow from sun direction
+  // This is a simplified version - proper shadow mapping would use shadow camera matrix
+  
+  // Bias based on surface angle to sun (prevents shadow acne)
+  let bias = max(0.005 * (1.0 - dot(normal, sunDir)), 0.001);
+  
+  // For this simplified version, we'll use a percentage-based shadow
+  // based on how aligned the surface is with the sun
+  let lightAlignment = max(dot(normal, sunDir), 0.0);
+  
+  // Soft shadow based on surface orientation
+  // This is a placeholder - will be replaced with actual shadow map sampling
+  return mix(0.3, 1.0, lightAlignment); // 30% shadow to 100% lit
+}
+
+// Fresnel approximation (Schlick's approximation)
+fn fresnel(cosTheta: f32, ior: f32) -> f32 {
+  let r0 = ((1.0 - ior) / (1.0 + ior)) * ((1.0 - ior) / (1.0 + ior));
+  return r0 + (1.0 - r0) * pow(1.0 - cosTheta, 5.0);
+}
+
 @fragment
 fn fragmentMain(in: VertexOutput) -> @location(0) vec4<f32> {
   // Sun direction from time of day
@@ -195,8 +259,11 @@ fn fragmentMain(in: VertexOutput) -> @location(0) vec4<f32> {
   // Normalize interpolated normal
   let normal = normalize(in.normal);
   
-  // Diffuse lighting
-  let diffuse = max(dot(normal, sunDir), 0.0);
+  // Calculate shadow factor
+  let shadowFactor = calculateShadow(in.worldPosition, normal, sunDir);
+  
+  // Diffuse lighting (with shadows)
+  let diffuse = max(dot(normal, sunDir), 0.0) * shadowFactor;
   
   // Smooth ambient light transitions (same as ray marcher)
   let sunElevation = sunDir.y;
@@ -212,13 +279,43 @@ fn fragmentMain(in: VertexOutput) -> @location(0) vec4<f32> {
   // Sky ambient fills in shadow crevices (same as ray marcher)
   let skyLight = 0.2 * (1.0 - max(dot(normal, vec3<f32>(0.0, -1.0, 0.0)), 0.0));
   
-  // Combined lighting (same formula as ray marcher)
+  // Combined lighting (with soft shadows!)
   let lighting = min(ambient + skyLight + diffuse * 0.6, 1.0);
   
   var color = in.color * lighting;
   
+  // Water transparency and reflections
+  // Extract camera position for view direction
+  let cameraPos = vec3<f32>(
+    -(camera.view[3][0] * camera.view[0][0] + camera.view[3][1] * camera.view[1][0] + camera.view[3][2] * camera.view[2][0]),
+    -(camera.view[3][0] * camera.view[0][1] + camera.view[3][1] * camera.view[1][1] + camera.view[3][2] * camera.view[2][1]),
+    -(camera.view[3][0] * camera.view[0][2] + camera.view[3][1] * camera.view[1][2] + camera.view[3][2] * camera.view[2][2])
+  );
+  
+  let viewDir = normalize(cameraPos - in.worldPosition);
+  let cosTheta = max(dot(viewDir, normal), 0.0);
+  
+  // Calculate Fresnel for water (IOR = 1.33)
+  let fresnelFactor = fresnel(cosTheta, 1.33);
+  
+  // Reflection direction
+  let reflectDir = reflect(-viewDir, normal);
+  
+  // Sample sky color for reflection
+  let skyReflection = getSkyColor(reflectDir, sunDir);
+  
+  var alpha = 1.0;
+  
+  // Check if this is water (check for blue-ish color as proxy)
+  // Water has high blue component, low red
+  if (in.color.b > 0.5 && in.color.r < 0.5) {
+    // Water: blend base color with sky reflection using Fresnel
+    color = mix(color, skyReflection * lighting, fresnelFactor * 0.3); // 0.3 = reflectivity from material
+    alpha = 0.85; // 0.2 transparency from material (1.0 - 0.8)
+  }
+  
   // Apply exponential fog
   color = applyFog(color, in.viewDistance, sunDir);
   
-  return vec4<f32>(color, 1.0);
+  return vec4<f32>(color, alpha);
 }

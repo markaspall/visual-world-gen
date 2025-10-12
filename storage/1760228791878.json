@@ -1,0 +1,1115 @@
+{
+  "graph": {
+    "nodes": [
+      {
+        "id": "node-0",
+        "type": "SeedInput",
+        "x": 100,
+        "y": 100,
+        "params": {
+          "value": 1759903420801
+        },
+        "displayName": "Seed"
+      },
+      {
+        "id": "node-1",
+        "type": "PerlinNoise",
+        "x": 450,
+        "y": 100,
+        "params": {
+          "frequency": 3.7,
+          "octaves": 3,
+          "persistence": 0.64,
+          "lacunarity": 2,
+          "scale": 0.4
+        },
+        "displayName": "Base Terrain"
+      },
+      {
+        "id": "node-2",
+        "type": "Normalize",
+        "x": 1150,
+        "y": 100,
+        "params": {
+          "min": 0,
+          "max": 0,
+          "passthrough": true
+        },
+        "displayName": "Normalize Height"
+      },
+      {
+        "id": "node-3",
+        "type": "DepthOutput",
+        "x": 1500,
+        "y": 100,
+        "params": {}
+      },
+      {
+        "id": "node-4",
+        "type": "PerlinNoise",
+        "x": 450,
+        "y": 220,
+        "params": {
+          "frequency": 2.9,
+          "octaves": 2,
+          "persistence": 0.6,
+          "lacunarity": 1.7,
+          "scale": 0.6
+        },
+        "displayName": "Moisture Map"
+      },
+      {
+        "id": "node-5",
+        "type": "Water",
+        "x": 1500,
+        "y": 220,
+        "params": {
+          "seaLevel": 0.5,
+          "numSources": 20,
+          "sourceSeed": 12345,
+          "minSourceHeight": 0.65,
+          "riverWidth": 1,
+          "flatnessThreshold": 0.02,
+          "meanderStrength": 0.3
+        },
+        "displayName": "Water System"
+      },
+      {
+        "id": "node-6",
+        "type": "WaterOutput",
+        "x": 1850,
+        "y": 100,
+        "params": {}
+      },
+      {
+        "id": "node-7",
+        "type": "PerlinNoise",
+        "x": 450,
+        "y": 340,
+        "params": {
+          "frequency": 1.5,
+          "octaves": 3,
+          "persistence": 0.6,
+          "lacunarity": 2,
+          "scale": 0.6
+        },
+        "displayName": "Temp Base Noise"
+      },
+      {
+        "id": "node-8",
+        "type": "Temperature",
+        "x": 1500,
+        "y": 340,
+        "params": {
+          "frequency": 2,
+          "octaves": 3,
+          "persistence": 0.39,
+          "lacunarity": 2,
+          "scale": 0.6,
+          "elevationInfluence": 0.51,
+          "latitudeInfluence": 0.2
+        },
+        "displayName": "Temperature"
+      },
+      {
+        "id": "node-9",
+        "type": "BiomeClassifier",
+        "x": 1850,
+        "y": 220,
+        "params": {
+          "biomes": [
+            {
+              "name": "Deep Ocean",
+              "color": "#0A2463",
+              "height": [
+                0,
+                0.3
+              ],
+              "moisture": null,
+              "temperature": null,
+              "water": [
+                0.01,
+                1
+              ]
+            },
+            {
+              "name": "Ocean",
+              "color": "#1E40AF",
+              "height": [
+                0.3,
+                0.4
+              ],
+              "moisture": null,
+              "temperature": null,
+              "water": [
+                0.01,
+                1
+              ]
+            },
+            {
+              "name": "Beach",
+              "color": "#FDE68A",
+              "height": [
+                0.4,
+                0.45
+              ],
+              "moisture": null,
+              "temperature": [
+                0.3,
+                1
+              ],
+              "water": [
+                0,
+                0
+              ]
+            },
+            {
+              "name": "Desert",
+              "color": "#F59E0B",
+              "height": [
+                0.45,
+                1
+              ],
+              "moisture": [
+                0,
+                0.25
+              ],
+              "temperature": [
+                0.6,
+                1
+              ],
+              "water": [
+                0,
+                0
+              ]
+            },
+            {
+              "name": "Savanna",
+              "color": "#D97706",
+              "height": [
+                0.45,
+                0.7
+              ],
+              "moisture": [
+                0.25,
+                0.45
+              ],
+              "temperature": [
+                0.5,
+                0.9
+              ],
+              "water": [
+                0,
+                0
+              ]
+            },
+            {
+              "name": "Grassland",
+              "color": "#84CC16",
+              "height": [
+                0.45,
+                0.7
+              ],
+              "moisture": [
+                0.3,
+                0.6
+              ],
+              "temperature": [
+                0.4,
+                0.7
+              ],
+              "water": [
+                0,
+                0
+              ]
+            },
+            {
+              "name": "Tropical Forest",
+              "color": "#15803D",
+              "height": [
+                0.45,
+                0.7
+              ],
+              "moisture": [
+                0.6,
+                1
+              ],
+              "temperature": [
+                0.7,
+                1
+              ],
+              "water": [
+                0,
+                0
+              ]
+            },
+            {
+              "name": "Temperate Forest",
+              "color": "#059669",
+              "height": [
+                0.45,
+                0.7
+              ],
+              "moisture": [
+                0.5,
+                0.8
+              ],
+              "temperature": [
+                0.3,
+                0.6
+              ],
+              "water": [
+                0,
+                0
+              ]
+            },
+            {
+              "name": "Taiga",
+              "color": "#064E3B",
+              "height": [
+                0.45,
+                0.8
+              ],
+              "moisture": [
+                0.4,
+                0.7
+              ],
+              "temperature": [
+                0.1,
+                0.4
+              ],
+              "water": [
+                0,
+                0
+              ]
+            },
+            {
+              "name": "Tundra",
+              "color": "#9CA3AF",
+              "height": [
+                0.45,
+                0.8
+              ],
+              "moisture": null,
+              "temperature": [
+                0,
+                0.2
+              ],
+              "water": [
+                0,
+                0
+              ]
+            },
+            {
+              "name": "Rocky Mountain",
+              "color": "#78716C",
+              "height": [
+                0.7,
+                0.85
+              ],
+              "moisture": null,
+              "temperature": [
+                0.2,
+                0.6
+              ],
+              "water": [
+                0,
+                0
+              ]
+            },
+            {
+              "name": "Snow Peak",
+              "color": "#F3F4F6",
+              "height": [
+                0.8,
+                1
+              ],
+              "moisture": null,
+              "temperature": null,
+              "water": [
+                0,
+                0
+              ]
+            },
+            {
+              "name": "Alpine",
+              "color": "#E5E7EB",
+              "height": [
+                0.7,
+                1
+              ],
+              "moisture": null,
+              "temperature": [
+                0,
+                0.3
+              ],
+              "water": [
+                0,
+                0
+              ]
+            }
+          ]
+        },
+        "displayName": "Biome Classifier"
+      },
+      {
+        "id": "node-10",
+        "type": "BiomeOutput",
+        "x": 2200,
+        "y": 100,
+        "params": {}
+      },
+      {
+        "id": "node-11",
+        "type": "SlopeMap",
+        "x": 1500,
+        "y": 460,
+        "params": {},
+        "displayName": "Slope Map"
+      },
+      {
+        "id": "node-12",
+        "type": "Features",
+        "x": 2200,
+        "y": 220,
+        "params": {
+          "features": [
+            {
+              "name": "Waterfall",
+              "color": "#00BFFF",
+              "enabled": true,
+              "waterMin": 0.01,
+              "gradientMin": 0.3,
+              "maxCount": 50
+            },
+            {
+              "name": "Mountain Peak",
+              "color": "#FFFFFF",
+              "enabled": true,
+              "heightMin": 0.8,
+              "gradientMax": 0.1,
+              "isLocalMaxima": true,
+              "maxCount": 30
+            },
+            {
+              "name": "Vista Point",
+              "color": "#FFD700",
+              "enabled": true,
+              "heightMin": 0.7,
+              "gradientMax": 0.2,
+              "maxCount": 20
+            },
+            {
+              "name": "Lake",
+              "color": "#1E90FF",
+              "enabled": true,
+              "waterMin": 0.5,
+              "gradientMax": 0.05,
+              "minArea": 100,
+              "maxCount": 15
+            },
+            {
+              "name": "River Crossing",
+              "color": "#4169E1",
+              "enabled": true,
+              "waterMin": 0.01,
+              "waterMax": 0.5,
+              "gradientMax": 0.15,
+              "maxCount": 40
+            }
+          ]
+        },
+        "displayName": "Features"
+      },
+      {
+        "id": "node-13",
+        "type": "FeaturesOutput",
+        "x": 2550,
+        "y": 100,
+        "params": {}
+      },
+      {
+        "id": "node-14",
+        "type": "Trails",
+        "x": 2550,
+        "y": 220,
+        "params": {
+          "maxSteepness": 0.4,
+          "pathReuseBonus": 0.7,
+          "waterCost": 10,
+          "flatTerrainBonus": 0.5,
+          "trailWidth": 2
+        },
+        "displayName": "Trails"
+      },
+      {
+        "id": "node-15",
+        "type": "TrailsOutput",
+        "x": 2900,
+        "y": 100,
+        "params": {}
+      },
+      {
+        "id": "node-16",
+        "type": "PerlinNoise",
+        "x": 450,
+        "y": 460,
+        "params": {
+          "frequency": 5,
+          "octaves": 2,
+          "persistence": 0.5,
+          "lacunarity": 2,
+          "scale": 1
+        },
+        "displayName": "Block Scatter Noise"
+      },
+      {
+        "id": "node-17",
+        "type": "BlockClassifier",
+        "x": 2200,
+        "y": 340,
+        "params": {
+          "blocks": [
+            {
+              "id": 0,
+              "name": "Air",
+              "color": "#000000",
+              "transparent": 1,
+              "emissive": 0,
+              "reflective": 0,
+              "refractive": 1,
+              "animationId": null
+            },
+            {
+              "id": 1,
+              "name": "Grass",
+              "color": "#45b545",
+              "transparent": 0,
+              "emissive": 0,
+              "reflective": 0,
+              "refractive": 1,
+              "animationId": null
+            },
+            {
+              "id": 2,
+              "name": "Dirt",
+              "color": "#8b5a3c",
+              "transparent": 0,
+              "emissive": 0,
+              "reflective": 0,
+              "refractive": 1,
+              "animationId": null
+            },
+            {
+              "id": 3,
+              "name": "Stone",
+              "color": "#808080",
+              "transparent": 0,
+              "emissive": 0,
+              "reflective": 0,
+              "refractive": 1,
+              "animationId": null
+            },
+            {
+              "id": 4,
+              "name": "Sand",
+              "color": "#edc9af",
+              "transparent": 0,
+              "emissive": 0,
+              "reflective": 0,
+              "refractive": 1,
+              "animationId": null
+            },
+            {
+              "id": 5,
+              "name": "Snow",
+              "color": "#ffffff",
+              "transparent": 0,
+              "emissive": 0,
+              "reflective": 0.3,
+              "refractive": 1,
+              "animationId": null
+            },
+            {
+              "id": 6,
+              "name": "Water",
+              "color": "#1e90ff",
+              "transparent": 0.8,
+              "emissive": 0,
+              "reflective": 0.2,
+              "refractive": 1.33,
+              "animationId": "node-20"
+            },
+            {
+              "id": 7,
+              "name": "Tree Seed",
+              "color": "#228b22",
+              "transparent": 0,
+              "emissive": 0,
+              "reflective": 0,
+              "refractive": 1,
+              "animationId": null
+            }
+          ],
+          "biomeRules": [
+            {
+              "biomeId": 0,
+              "biomeName": "Deep Ocean",
+              "blocks": [
+                {
+                  "blockId": 4,
+                  "blockName": "Sand",
+                  "weight": 1
+                }
+              ],
+              "waterBlocks": [
+                {
+                  "blockId": 6,
+                  "blockName": "Ocean Water",
+                  "weight": 1
+                }
+              ]
+            },
+            {
+              "biomeId": 1,
+              "biomeName": "Ocean",
+              "blocks": [
+                {
+                  "blockId": 4,
+                  "blockName": "Sand",
+                  "weight": 1
+                }
+              ],
+              "waterBlocks": [
+                {
+                  "blockId": 6,
+                  "blockName": "Ocean Water",
+                  "weight": 1
+                }
+              ]
+            },
+            {
+              "biomeId": 2,
+              "biomeName": "Beach",
+              "blocks": [
+                {
+                  "blockId": 4,
+                  "blockName": "Sand",
+                  "weight": 1
+                }
+              ],
+              "waterBlocks": [
+                {
+                  "blockId": 6,
+                  "blockName": "Clear Water",
+                  "weight": 1
+                }
+              ]
+            },
+            {
+              "biomeId": 3,
+              "biomeName": "Desert",
+              "blocks": [
+                {
+                  "blockId": 4,
+                  "blockName": "Sand",
+                  "weight": 1
+                }
+              ],
+              "waterBlocks": [
+                {
+                  "blockId": 6,
+                  "blockName": "Clear Water",
+                  "weight": 1
+                }
+              ]
+            },
+            {
+              "biomeId": 4,
+              "biomeName": "Savanna",
+              "blocks": [
+                {
+                  "blockId": 1,
+                  "blockName": "Grass",
+                  "weight": 0.9
+                },
+                {
+                  "blockId": 7,
+                  "blockName": "Tree Seed",
+                  "weight": 0.1
+                }
+              ],
+              "waterBlocks": [
+                {
+                  "blockId": 6,
+                  "blockName": "Clear Water",
+                  "weight": 1
+                }
+              ]
+            },
+            {
+              "biomeId": 5,
+              "biomeName": "Grassland",
+              "blocks": [
+                {
+                  "blockId": 1,
+                  "blockName": "Grass",
+                  "weight": 1
+                }
+              ],
+              "waterBlocks": [
+                {
+                  "blockId": 6,
+                  "blockName": "Clear Water",
+                  "weight": 1
+                }
+              ]
+            },
+            {
+              "biomeId": 6,
+              "biomeName": "Tropical Forest",
+              "blocks": [
+                {
+                  "blockId": 1,
+                  "blockName": "Grass",
+                  "weight": 0.8
+                },
+                {
+                  "blockId": 7,
+                  "blockName": "Tree Seed",
+                  "weight": 0.2
+                }
+              ],
+              "waterBlocks": [
+                {
+                  "blockId": 6,
+                  "blockName": "Clear Water",
+                  "weight": 1
+                }
+              ]
+            },
+            {
+              "biomeId": 7,
+              "biomeName": "Temperate Forest",
+              "blocks": [
+                {
+                  "blockId": 1,
+                  "blockName": "Grass",
+                  "weight": 0.85
+                },
+                {
+                  "blockId": 7,
+                  "blockName": "Tree Seed",
+                  "weight": 0.15
+                }
+              ],
+              "waterBlocks": [
+                {
+                  "blockId": 6,
+                  "blockName": "Clear Water",
+                  "weight": 1
+                }
+              ]
+            },
+            {
+              "biomeId": 8,
+              "biomeName": "Taiga",
+              "blocks": [
+                {
+                  "blockId": 1,
+                  "blockName": "Grass",
+                  "weight": 0.9
+                },
+                {
+                  "blockId": 7,
+                  "blockName": "Tree Seed",
+                  "weight": 0.1
+                }
+              ],
+              "waterBlocks": [
+                {
+                  "blockId": 6,
+                  "blockName": "Clear Water",
+                  "weight": 1
+                }
+              ]
+            },
+            {
+              "biomeId": 9,
+              "biomeName": "Tundra",
+              "blocks": [
+                {
+                  "blockId": 5,
+                  "blockName": "Snow",
+                  "weight": 1
+                }
+              ],
+              "waterBlocks": [
+                {
+                  "blockId": 6,
+                  "blockName": "Clear Water",
+                  "weight": 1
+                }
+              ]
+            },
+            {
+              "biomeId": 10,
+              "biomeName": "Rocky Mountain",
+              "blocks": [
+                {
+                  "blockId": 3,
+                  "blockName": "Stone",
+                  "weight": 1
+                }
+              ],
+              "waterBlocks": [
+                {
+                  "blockId": 6,
+                  "blockName": "Clear Water",
+                  "weight": 1
+                }
+              ]
+            },
+            {
+              "biomeId": 11,
+              "biomeName": "Snow Peak",
+              "blocks": [
+                {
+                  "blockId": 5,
+                  "blockName": "Snow",
+                  "weight": 1
+                }
+              ],
+              "waterBlocks": [
+                {
+                  "blockId": 6,
+                  "blockName": "Clear Water",
+                  "weight": 1
+                }
+              ]
+            },
+            {
+              "biomeId": 12,
+              "biomeName": "Alpine",
+              "blocks": [
+                {
+                  "blockId": 5,
+                  "blockName": "Snow",
+                  "weight": 0.7
+                },
+                {
+                  "blockId": 3,
+                  "blockName": "Stone",
+                  "weight": 0.3
+                }
+              ],
+              "waterBlocks": [
+                {
+                  "blockId": 6,
+                  "blockName": "Clear Water",
+                  "weight": 1
+                }
+              ]
+            }
+          ],
+          "waterBlockId": 6,
+          "useNoise1": true,
+          "noise1Influence": 1
+        },
+        "displayName": "Block Classifier"
+      },
+      {
+        "id": "node-18",
+        "type": "BlockMapOutput",
+        "x": 2550,
+        "y": 340,
+        "params": {}
+      },
+      {
+        "id": "node-19",
+        "type": "HeightLOD",
+        "x": 1500,
+        "y": 580,
+        "params": {
+          "lod1Size": 128,
+          "lod2Size": 32,
+          "lod3Size": 8
+        },
+        "displayName": "Height LOD"
+      },
+      {
+        "id": "node-20",
+        "type": "SurfaceAnimation",
+        "x": 100,
+        "y": 220,
+        "params": {
+          "name": "Water Ripples",
+          "type": "ripples",
+          "speed": 0.5,
+          "scale": 0.15,
+          "strength": 0.08,
+          "octaves": 3,
+          "direction": {
+            "x": 1,
+            "y": 0
+          }
+        },
+        "displayName": "Water Ripples"
+      },
+      {
+        "id": "node-25",
+        "type": "Erosion",
+        "x": 800,
+        "y": 100,
+        "params": {
+          "iterations": 1000,
+          "erosionRate": 0.3,
+          "depositionRate": 0.3,
+          "evaporationRate": 0.26,
+          "minSlope": 0.72
+        }
+      }
+    ],
+    "connections": [
+      {
+        "from": "node-0",
+        "output": "seed",
+        "to": "node-1",
+        "input": "seed"
+      },
+      {
+        "from": "node-2",
+        "output": "output",
+        "to": "node-3",
+        "input": "input"
+      },
+      {
+        "from": "node-0",
+        "output": "seed",
+        "to": "node-4",
+        "input": "seed"
+      },
+      {
+        "from": "node-2",
+        "output": "output",
+        "to": "node-5",
+        "input": "height"
+      },
+      {
+        "from": "node-4",
+        "output": "output",
+        "to": "node-5",
+        "input": "moisture"
+      },
+      {
+        "from": "node-5",
+        "output": "output",
+        "to": "node-6",
+        "input": "input"
+      },
+      {
+        "from": "node-0",
+        "output": "seed",
+        "to": "node-7",
+        "input": "seed"
+      },
+      {
+        "from": "node-7",
+        "output": "output",
+        "to": "node-8",
+        "input": "seed"
+      },
+      {
+        "from": "node-2",
+        "output": "output",
+        "to": "node-8",
+        "input": "height"
+      },
+      {
+        "from": "node-2",
+        "output": "output",
+        "to": "node-9",
+        "input": "height"
+      },
+      {
+        "from": "node-4",
+        "output": "output",
+        "to": "node-9",
+        "input": "moisture"
+      },
+      {
+        "from": "node-8",
+        "output": "output",
+        "to": "node-9",
+        "input": "temperature"
+      },
+      {
+        "from": "node-5",
+        "output": "output",
+        "to": "node-9",
+        "input": "water"
+      },
+      {
+        "from": "node-9",
+        "output": "colorMap",
+        "to": "node-10",
+        "input": "input"
+      },
+      {
+        "from": "node-2",
+        "output": "output",
+        "to": "node-11",
+        "input": "height"
+      },
+      {
+        "from": "node-2",
+        "output": "output",
+        "to": "node-12",
+        "input": "height"
+      },
+      {
+        "from": "node-5",
+        "output": "output",
+        "to": "node-12",
+        "input": "water"
+      },
+      {
+        "from": "node-11",
+        "output": "magnitude",
+        "to": "node-12",
+        "input": "gradient"
+      },
+      {
+        "from": "node-9",
+        "output": "output",
+        "to": "node-12",
+        "input": "biomes"
+      },
+      {
+        "from": "node-4",
+        "output": "output",
+        "to": "node-12",
+        "input": "moisture"
+      },
+      {
+        "from": "node-8",
+        "output": "output",
+        "to": "node-12",
+        "input": "temperature"
+      },
+      {
+        "from": "node-12",
+        "output": "featureMap",
+        "to": "node-13",
+        "input": "input"
+      },
+      {
+        "from": "node-12",
+        "output": "features",
+        "to": "node-14",
+        "input": "features"
+      },
+      {
+        "from": "node-2",
+        "output": "output",
+        "to": "node-14",
+        "input": "height"
+      },
+      {
+        "from": "node-11",
+        "output": "magnitude",
+        "to": "node-14",
+        "input": "gradient"
+      },
+      {
+        "from": "node-9",
+        "output": "output",
+        "to": "node-14",
+        "input": "biomes"
+      },
+      {
+        "from": "node-5",
+        "output": "output",
+        "to": "node-14",
+        "input": "water"
+      },
+      {
+        "from": "node-14",
+        "output": "trails",
+        "to": "node-15",
+        "input": "input"
+      },
+      {
+        "from": "node-0",
+        "output": "seed",
+        "to": "node-16",
+        "input": "seed"
+      },
+      {
+        "from": "node-9",
+        "output": "output",
+        "to": "node-17",
+        "input": "biomes"
+      },
+      {
+        "from": "node-5",
+        "output": "output",
+        "to": "node-17",
+        "input": "water"
+      },
+      {
+        "from": "node-2",
+        "output": "output",
+        "to": "node-17",
+        "input": "height"
+      },
+      {
+        "from": "node-16",
+        "output": "output",
+        "to": "node-17",
+        "input": "noise1"
+      },
+      {
+        "from": "node-17",
+        "output": "blockMapVis",
+        "to": "node-18",
+        "input": "input"
+      },
+      {
+        "from": "node-9",
+        "output": "biomeList",
+        "to": "node-17",
+        "input": "biomeList"
+      },
+      {
+        "from": "node-2",
+        "output": "output",
+        "to": "node-19",
+        "input": "height"
+      },
+      {
+        "from": "node-20",
+        "output": "animation",
+        "to": "node-17",
+        "input": "animations"
+      },
+      {
+        "from": "node-1",
+        "output": "output",
+        "to": "node-25",
+        "input": "input"
+      },
+      {
+        "from": "node-25",
+        "output": "output",
+        "to": "node-2",
+        "input": "input"
+      }
+    ],
+    "seed": 1759903421473,
+    "resolution": 512,
+    "savedAt": "10/12/2025, 8:26:31 AM",
+    "nodeCount": 22,
+    "connectionCount": 39
+  }
+}

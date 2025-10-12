@@ -106,7 +106,32 @@
   </div>
 
 
-  <button class="btn" onclick="location.href='/'">← Back to Editor</button>
+  <div id="renderer-nav" style="position: absolute; top: 20px; right: 20px; display: none; flex-direction: column; gap: 10px; align-items: flex-end;">
+    <div style="display: flex; gap: 10px;">
+      <button class="btn" id="svdag-btn" style="background: #FF9800; min-width: 100px;">🌳 SVDAG</button>
+      <button class="btn" id="mesh-btn" style="background: #4CAF50; min-width: 100px;">🎨 Mesh</button>
+    </div>
+    <button class="btn" style="width: 210px;" onclick="location.href='/'">← Back to Editor</button>
+  </div>
+  
+  <script>
+    let currentWorldId = '';
+    
+    function getWorldId() {
+      // First check if we stored it
+      if (currentWorldId) return currentWorldId;
+      // Otherwise extract from current URL
+      const match = window.location.pathname.match(/\/worlds\/([^\/]+)/);
+      return match ? match[1] : '';
+    }
+    
+    function setWorldId(worldId) {
+      currentWorldId = worldId;
+      // Update button links
+      document.getElementById('svdag-btn').onclick = () => location.href = `/worlds/${worldId}/svdag`;
+      document.getElementById('mesh-btn').onclick = () => location.href = `/worlds/${worldId}/mesh`;
+    }
+  </script>
 
   <script type="module">
     import { WorldRenderer } from '/js/worldRenderer.js';
@@ -167,15 +192,19 @@
       try {
         console.log('Loading world:', worldId);
         
+        // Store world ID for navigation buttons
+        setWorldId(worldId);
+        
         const response = await fetch(`/api/worlds/${worldId}`);
         if (!response.ok) throw new Error('Failed to load world');
         
         const worldData = await response.json();
         console.log('World data loaded:', worldData);
 
-        // Hide loading, show HUD
+        // Hide loading, show HUD and navigation
         loading.style.display = 'none';
         hud.style.display = 'block';
+        document.getElementById('renderer-nav').style.display = 'flex';
 
         // Initialize renderer
         renderer = new WorldRenderer(canvas, worldData);

@@ -132,26 +132,27 @@
     <div class="stat">
       <span class="label">Position:</span>
       <span class="value" id="position">--</span>
-    </div>
     <div class="stat">
       <span class="label">Direction:</span>
       <span class="value" id="direction">--</span>
     </div>
   </div>
-  
-  <div id="controls">
-    <h4>⌨️ Controls</h4>
-    <div>W/A/S/D - Move</div>
-    <div>Space/Shift - Up/Down</div>
-    <div>Mouse - Look around</div>
-    <div>Esc - Release pointer</div>
+  <div class="controls-panel">
+    <h3>📋 Controls</h3>
+    <p><strong>W/A/S/D</strong> – Move</p>
+    <p><strong>Space/Shift</strong> – Up/Down</p>
+    <p><strong>Mouse</strong> – Look around</p>
+    <p><strong>F</strong> – Toggle Fog</p>
+    <p><strong>Esc</strong> – Release pointer</p>
   </div>
   
-  <button id="toggle-btn">← Back to Ray Marcher</button>
+  <div style="position: absolute; top: 20px; right: 20px; display: flex; gap: 10px;">
+    <button class="toggle-btn secondary" onclick="location.href='/worlds/<%= worldId %>'">🔵 DDA</button>
+    <button class="toggle-btn" onclick="location.href='/worlds/<%= worldId %>/svdag'">🌳 SVDAG</button>
+  </div>
   
   <script type="module">
     import { MeshRenderer } from '/js/meshRenderer.js';
-    
     const canvas = document.getElementById('canvas');
     const worldId = '<%= worldId %>';
     
@@ -200,11 +201,6 @@
     
     window.addEventListener('resize', resizeCanvas);
     
-    // Toggle button
-    document.getElementById('toggle-btn').addEventListener('click', () => {
-      window.location.href = `/worlds/${worldId}`;
-    });
-    
     // Load world data and initialize renderer
     console.log('Loading world:', worldId);
     
@@ -226,8 +222,9 @@
       
       // Camera controls
       const keys = {};
-      const moveSpeed = 10.0;
-      const lookSpeed = 0.2;
+      const moveSpeed = 3.0;  // Slower, more controlled movement
+      const lookSpeed = 0.05; // Very slow, precise look speed
+      let fogEnabled = true;  // Toggle fog on/off
       let pointerLocked = false;
       
       window.addEventListener('keydown', (e) => {
@@ -235,25 +232,45 @@
         if (e.key === 'Escape') {
           document.exitPointerLock();
         }
+        if (e.key === 'f' || e.key === 'F') {
+          fogEnabled = !fogEnabled;
+          renderer.setFogEnabled(fogEnabled);
+          console.log('Fog:', fogEnabled ? 'ON' : 'OFF');
+        }
       });
       
       window.addEventListener('keyup', (e) => {
         keys[e.key.toLowerCase()] = false;
       });
       
+      // Click to lock pointer
       canvas.addEventListener('click', () => {
-        canvas.requestPointerLock();
+        if (!pointerLocked) {
+          canvas.requestPointerLock();
+        }
       });
       
+      // Track pointer lock state
       document.addEventListener('pointerlockchange', () => {
         pointerLocked = document.pointerLockElement === canvas;
+        if (pointerLocked) {
+          console.log('✅ Pointer locked - move mouse to look around');
+        } else {
+          console.log('❌ Pointer released - click canvas to re-lock');
+        }
       });
       
-      canvas.addEventListener('mousemove', (e) => {
+      // Mouse movement (when locked) - ONLY ROTATES, DOESN'T MOVE!
+      document.addEventListener('mousemove', (e) => {
         if (!pointerLocked) return;
         
-        renderer.camera.direction[0] += e.movementX * lookSpeed;
-        renderer.camera.direction[1] = Math.max(-89, Math.min(89, renderer.camera.direction[1] - e.movementY * lookSpeed));
+        // ONLY change direction (yaw/pitch), NOT position!
+        // Note: Yaw increases = turn right (positive X movement)
+        renderer.camera.direction[0] -= e.movementX * lookSpeed; // NEGATED for correct direction
+        renderer.camera.direction[1] = Math.max(-89, Math.min(89, renderer.camera.direction[1] + e.movementY * lookSpeed)); // NEGATED for correct direction
+        
+        // Debug camera
+        // console.log('Camera dir:', renderer.camera.direction);
       });
       
       // Animation loop
@@ -266,12 +283,14 @@
         const yaw = renderer.camera.direction[0] * Math.PI / 180;
         const pitch = renderer.camera.direction[1] * Math.PI / 180;
         
+        // Flight-style controls: W/S moves toward where you're looking (including pitch)
         const forward = [
           Math.cos(pitch) * Math.sin(yaw),
           Math.sin(pitch),
           Math.cos(pitch) * Math.cos(yaw)
         ];
         
+        // Strafe is always horizontal (perpendicular to yaw)
         const right = [
           Math.cos(yaw),
           0,
@@ -280,6 +299,7 @@
         
         const speed = moveSpeed * dt;
         
+        // W/S: Move forward/back in the direction you're looking (includes Y!)
         if (keys['w']) {
           renderer.camera.position[0] += forward[0] * speed;
           renderer.camera.position[1] += forward[1] * speed;

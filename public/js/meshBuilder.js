@@ -14,21 +14,26 @@
 
 export class GreedyMeshBuilder {
   constructor() {
-    this.voxelSize = 0.333; // Should match world voxelSize
+    this.voxelSize = 0.333; // Default, will be overridden
   }
 
   /**
    * Build an optimized mesh from world data
    * 
    * @param {Object} worldData - World data from generator
-   * @param {Float32Array} heightMap - Height values (512×512)
+   * @param {Float32Array} heightMap - Height values (in voxel coordinates 0-512)
    * @param {Uint8Array} blocksMap - Block type IDs (512×512)
+   * @param {Float32Array} waterMap - Water elevation (normalized 0-1, multiply by 256 for voxel height)
    * @param {number} resolution - World resolution (512)
    * @returns {Object} Mesh data ready for GPU
    */
-  buildTerrainMesh(worldData, heightMap, blocksMap, resolution) {
-    console.log('🔨 Building greedy mesh...');
+  buildTerrainMesh(worldData, heightMap, blocksMap, waterMap, resolution) {
+    console.log('🔨 Building greedy mesh (terrain + water)...');
     const startTime = performance.now();
+    
+    // Use voxelSize from world data
+    this.voxelSize = worldData.voxelSize || 0.333;
+    console.log(`  → Voxel size: ${this.voxelSize}m`);
 
     // Initialize data structures
     const vertices = [];
@@ -42,6 +47,12 @@ export class GreedyMeshBuilder {
     worldData.blocks.forEach(block => {
       materialMap.set(block.id, block);
     });
+    
+    // Log available materials for debugging
+    console.log('📦 Available materials:');
+    worldData.blocks.forEach(block => {
+      console.log(`  - ${block.name} (ID: ${block.id}, Color: ${block.color})`);
+    });
 
     // Helper to get height at (x, z)
     const getHeight = (x, z) => {
@@ -54,9 +65,18 @@ export class GreedyMeshBuilder {
     // Helper to get block type at (x, z)
     const getBlock = (x, z) => {
       if (x < 0 || x >= resolution || z < 0 || z >= resolution) {
-        return 0; // Air
+        return 0;
       }
       return blocksMap[z * resolution + x];
+    };
+    
+    // Helper to get water elevation at (x, z)
+    const getWaterLevel = (x, z) => {
+      if (x < 0 || x >= resolution || z < 0 || z >= resolution) {
+        return 0;
+      }
+      // Water map is normalized 0-1, convert to same scale as terrain (0-512)
+      return waterMap[z * resolution + x] * 512.0;
     };
 
     // Calculate smooth normal from height gradient
@@ -77,6 +97,8 @@ export class GreedyMeshBuilder {
       const len = Math.sqrt(nx * nx + ny * ny + nz * nz);
       return [nx / len, ny / len, nz / len];
     };
+
+    // Note: Water is now generated from waterMap, not from block materials
 
     // Helper to get block color
     const getBlockColor = (blockId) => {
@@ -102,6 +124,16 @@ export class GreedyMeshBuilder {
     
     console.log('  → Generating top faces...');
     
+    // Debug: Check height range
+    let minHeight = Infinity;
+    let maxHeight = -Infinity;
+    for (let i = 0; i < heightMap.length; i++) {
+      minHeight = Math.min(minHeight, heightMap[i]);
+      maxHeight = Math.max(maxHeight, heightMap[i]);
+    }
+    console.log(`  → Height range: ${minHeight.toFixed(2)} - ${maxHeight.toFixed(2)} voxels`);
+    console.log(`  → World coords: ${(minHeight * this.voxelSize).toFixed(2)}m - ${(maxHeight * this.voxelSize).toFixed(2)}m`);
+    
     // Phase 1: Generate all top faces (one quad per voxel column)
     for (let z = 0; z < resolution; z++) {
       for (let x = 0; x < resolution; x++) {
@@ -111,17 +143,22 @@ export class GreedyMeshBuilder {
         // Skip air blocks
         if (blockId === 0) continue;
         
+        // Position in world coordinates
+        // Apply voxelSize to ALL dimensions for cubic voxels
         const y = height * this.voxelSize;
         const x0 = x * this.voxelSize;
         const z0 = z * this.voxelSize;
-        const x1 = x0 + this.voxelSize;
-        const z1 = z0 + this.voxelSize;
+        const x1 = (x + 1) * this.voxelSize;
+        const z1 = (z + 1) * this.voxelSize;
         
-        // Calculate smooth normal for this position
-        const normal = calculateNormal(x, z);
+        // Use flat normal for crisp voxel look (pointing up)
+        const normal = [0, 1, 0];
         
         // Get color from material
         const color = getBlockColor(blockId);
+        
+        // Terrain blocks are NOT water (water comes from waterMap)
+        const materialId = blockId;
         
         // Create quad (2 triangles) for top face
         // Vertices ordered counter-clockwise from top view:
@@ -136,25 +173,25 @@ export class GreedyMeshBuilder {
         vertices.push(x0, y, z0);
         normals.push(...normal);
         colors.push(...color);
-        materialIds.push(blockId);
+        materialIds.push(materialId);
         
         // v1: (x1, y, z0)
         vertices.push(x1, y, z0);
         normals.push(...normal);
         colors.push(...color);
-        materialIds.push(blockId);
+        materialIds.push(materialId);
         
         // v2: (x1, y, z1)
         vertices.push(x1, y, z1);
         normals.push(...normal);
         colors.push(...color);
-        materialIds.push(blockId);
+        materialIds.push(materialId);
         
         // v3: (x0, y, z1)
         vertices.push(x0, y, z1);
         normals.push(...normal);
         colors.push(...color);
-        materialIds.push(blockId);
+        materialIds.push(materialId);
         
         // Triangle 1: v0 → v1 → v2
         indices.push(baseIndex, baseIndex + 1, baseIndex + 2);
@@ -174,13 +211,18 @@ export class GreedyMeshBuilder {
         
         if (blockId === 0) continue;
         
+        // Position in world coordinates (same as top faces)
         const y = height * this.voxelSize;
         const x0 = x * this.voxelSize;
         const z0 = z * this.voxelSize;
-        const x1 = x0 + this.voxelSize;
-        const z1 = z0 + this.voxelSize;
+        const x1 = (x + 1) * this.voxelSize;
+        const z1 = (z + 1) * this.voxelSize;
         
         const color = getBlockColor(blockId);
+        const materialId = blockId; // Terrain only, water is separate
+        
+        // Use flat normals for all terrain side faces too
+        const normalUp = [0, 1, 0];
         
         // Check +X neighbor (right)
         const heightPX = getHeight(x + 1, z);
@@ -193,22 +235,22 @@ export class GreedyMeshBuilder {
           vertices.push(x1, y1, z0);  // Bottom-left
           normals.push(...normal);
           colors.push(...color);
-          materialIds.push(blockId);
+          materialIds.push(materialId);
           
           vertices.push(x1, y, z0);   // Top-left
           normals.push(...normal);
           colors.push(...color);
-          materialIds.push(blockId);
+          materialIds.push(materialId);
           
           vertices.push(x1, y, z1);   // Top-right
           normals.push(...normal);
           colors.push(...color);
-          materialIds.push(blockId);
+          materialIds.push(materialId);
           
           vertices.push(x1, y1, z1);  // Bottom-right
           normals.push(...normal);
           colors.push(...color);
-          materialIds.push(blockId);
+          materialIds.push(materialId);
           
           indices.push(baseIndex, baseIndex + 1, baseIndex + 2);
           indices.push(baseIndex, baseIndex + 2, baseIndex + 3);
@@ -224,22 +266,22 @@ export class GreedyMeshBuilder {
           vertices.push(x0, y1, z1);  // Bottom-left
           normals.push(...normal);
           colors.push(...color);
-          materialIds.push(blockId);
+          materialIds.push(materialId);
           
           vertices.push(x0, y, z1);   // Top-left
           normals.push(...normal);
           colors.push(...color);
-          materialIds.push(blockId);
+          materialIds.push(materialId);
           
           vertices.push(x0, y, z0);   // Top-right
           normals.push(...normal);
           colors.push(...color);
-          materialIds.push(blockId);
+          materialIds.push(materialId);
           
           vertices.push(x0, y1, z0);  // Bottom-right
           normals.push(...normal);
           colors.push(...color);
-          materialIds.push(blockId);
+          materialIds.push(materialId);
           
           indices.push(baseIndex, baseIndex + 1, baseIndex + 2);
           indices.push(baseIndex, baseIndex + 2, baseIndex + 3);
@@ -255,22 +297,22 @@ export class GreedyMeshBuilder {
           vertices.push(x0, y1, z1);  // Bottom-left
           normals.push(...normal);
           colors.push(...color);
-          materialIds.push(blockId);
+          materialIds.push(materialId);
           
           vertices.push(x0, y, z1);   // Top-left
           normals.push(...normal);
           colors.push(...color);
-          materialIds.push(blockId);
+          materialIds.push(materialId);
           
           vertices.push(x1, y, z1);   // Top-right
           normals.push(...normal);
           colors.push(...color);
-          materialIds.push(blockId);
+          materialIds.push(materialId);
           
           vertices.push(x1, y1, z1);  // Bottom-right
           normals.push(...normal);
           colors.push(...color);
-          materialIds.push(blockId);
+          materialIds.push(materialId);
           
           indices.push(baseIndex, baseIndex + 1, baseIndex + 2);
           indices.push(baseIndex, baseIndex + 2, baseIndex + 3);
@@ -286,27 +328,270 @@ export class GreedyMeshBuilder {
           vertices.push(x1, y1, z0);  // Bottom-left
           normals.push(...normal);
           colors.push(...color);
-          materialIds.push(blockId);
+          materialIds.push(materialId);
           
           vertices.push(x1, y, z0);   // Top-left
           normals.push(...normal);
           colors.push(...color);
-          materialIds.push(blockId);
+          materialIds.push(materialId);
           
           vertices.push(x0, y, z0);   // Top-right
           normals.push(...normal);
           colors.push(...color);
-          materialIds.push(blockId);
+          materialIds.push(materialId);
           
           vertices.push(x0, y1, z0);  // Bottom-right
           normals.push(...normal);
           colors.push(...color);
-          materialIds.push(blockId);
+          materialIds.push(materialId);
           
           indices.push(baseIndex, baseIndex + 1, baseIndex + 2);
           indices.push(baseIndex, baseIndex + 2, baseIndex + 3);
         }
       }
+    }
+    
+    console.log('  → Generating water voxels (3D blocks)...');
+    
+    // Phase 3: Generate water as 3D voxel blocks (like Minecraft water)
+    let waterVoxelCount = 0;
+    let waterFaceCount = 0;
+    let minWater = Infinity;
+    let maxWater = -Infinity;
+    
+    // Find Water block material from world data
+    const waterBlock = worldData.blocks.find(b => b.name.toLowerCase() === 'water');
+    const waterColor = waterBlock ? getBlockColor(waterBlock.id) : [0.12, 0.56, 1.0];
+    const waterMaterialId = waterBlock ? (waterBlock.id | 0x80000000) : 0x80000000;
+    
+    console.log(`  → Water color from material ID ${waterBlock?.id}: [${waterColor.join(', ')}]`);
+    
+    // Helper to check if a position should have water
+    const hasWater = (x, z, y) => {
+      if (x < 0 || x >= resolution || z < 0 || z >= resolution) return false;
+      const waterLevel = getWaterLevel(x, z);
+      const terrainHeight = getHeight(x, z);
+      return y <= waterLevel && y > terrainHeight;
+    };
+    
+    for (let z = 0; z < resolution; z++) {
+      for (let x = 0; x < resolution; x++) {
+        const waterLevel = getWaterLevel(x, z); // In voxels (0-512)
+        const terrainHeight = getHeight(x, z); // In voxels (0-512)
+        
+        // Skip if no water here (water must be above terrain)
+        if (waterLevel <= terrainHeight) continue;
+        
+        minWater = Math.min(minWater, waterLevel);
+        maxWater = Math.max(maxWater, waterLevel);
+        
+        // Generate vertical column of water voxels from terrain to water level
+        const startY = Math.floor(terrainHeight) + 1; // First voxel above terrain
+        const endY = Math.ceil(waterLevel); // Last voxel at water level
+        
+        for (let y = startY; y <= endY; y++) {
+          waterVoxelCount++;
+          
+          // World coordinates for this water voxel (cubic!)
+          const wy = y * this.voxelSize;
+          const x0 = x * this.voxelSize;
+          const z0 = z * this.voxelSize;
+          const x1 = (x + 1) * this.voxelSize;
+          const z1 = (z + 1) * this.voxelSize;
+          const y0 = wy;
+          const y1 = wy + this.voxelSize;
+          
+          // Only render exposed faces (not faces touching other water voxels)
+          
+          // Top face (+Y) - only if no water above OR this is the top water voxel
+          if (!hasWater(x, z, y + 1)) {
+            const normal = [0, 1, 0];
+            const baseIndex = vertices.length / 3;
+            
+            vertices.push(x0, y1, z0);
+            normals.push(...normal);
+            colors.push(...waterColor);
+            materialIds.push(waterMaterialId);
+            
+            vertices.push(x1, y1, z0);
+            normals.push(...normal);
+            colors.push(...waterColor);
+            materialIds.push(waterMaterialId);
+            
+            vertices.push(x1, y1, z1);
+            normals.push(...normal);
+            colors.push(...waterColor);
+            materialIds.push(waterMaterialId);
+            
+            vertices.push(x0, y1, z1);
+            normals.push(...normal);
+            colors.push(...waterColor);
+            materialIds.push(waterMaterialId);
+            
+            indices.push(baseIndex, baseIndex + 1, baseIndex + 2);
+            indices.push(baseIndex, baseIndex + 2, baseIndex + 3);
+            waterFaceCount++;
+          }
+          
+          // Bottom face (-Y) - only if no water below
+          if (!hasWater(x, z, y - 1)) {
+            const normal = [0, -1, 0];
+            const baseIndex = vertices.length / 3;
+            
+            vertices.push(x0, y0, z0);
+            normals.push(...normal);
+            colors.push(...waterColor);
+            materialIds.push(waterMaterialId);
+            
+            vertices.push(x0, y0, z1);
+            normals.push(...normal);
+            colors.push(...waterColor);
+            materialIds.push(waterMaterialId);
+            
+            vertices.push(x1, y0, z1);
+            normals.push(...normal);
+            colors.push(...waterColor);
+            materialIds.push(waterMaterialId);
+            
+            vertices.push(x1, y0, z0);
+            normals.push(...normal);
+            colors.push(...waterColor);
+            materialIds.push(waterMaterialId);
+            
+            indices.push(baseIndex, baseIndex + 1, baseIndex + 2);
+            indices.push(baseIndex, baseIndex + 2, baseIndex + 3);
+            waterFaceCount++;
+          }
+          
+          // +X face (right)
+          if (!hasWater(x + 1, z, y)) {
+            const normal = [1, 0, 0];
+            const baseIndex = vertices.length / 3;
+            
+            vertices.push(x1, y0, z0);
+            normals.push(...normal);
+            colors.push(...waterColor);
+            materialIds.push(waterMaterialId);
+            
+            vertices.push(x1, y1, z0);
+            normals.push(...normal);
+            colors.push(...waterColor);
+            materialIds.push(waterMaterialId);
+            
+            vertices.push(x1, y1, z1);
+            normals.push(...normal);
+            colors.push(...waterColor);
+            materialIds.push(waterMaterialId);
+            
+            vertices.push(x1, y0, z1);
+            normals.push(...normal);
+            colors.push(...waterColor);
+            materialIds.push(waterMaterialId);
+            
+            indices.push(baseIndex, baseIndex + 1, baseIndex + 2);
+            indices.push(baseIndex, baseIndex + 2, baseIndex + 3);
+            waterFaceCount++;
+          }
+          
+          // -X face (left)
+          if (!hasWater(x - 1, z, y)) {
+            const normal = [-1, 0, 0];
+            const baseIndex = vertices.length / 3;
+            
+            vertices.push(x0, y0, z0);
+            normals.push(...normal);
+            colors.push(...waterColor);
+            materialIds.push(waterMaterialId);
+            
+            vertices.push(x0, y0, z1);
+            normals.push(...normal);
+            colors.push(...waterColor);
+            materialIds.push(waterMaterialId);
+            
+            vertices.push(x0, y1, z1);
+            normals.push(...normal);
+            colors.push(...waterColor);
+            materialIds.push(waterMaterialId);
+            
+            vertices.push(x0, y1, z0);
+            normals.push(...normal);
+            colors.push(...waterColor);
+            materialIds.push(waterMaterialId);
+            
+            indices.push(baseIndex, baseIndex + 1, baseIndex + 2);
+            indices.push(baseIndex, baseIndex + 2, baseIndex + 3);
+            waterFaceCount++;
+          }
+          
+          // +Z face (back)
+          if (!hasWater(x, z + 1, y)) {
+            const normal = [0, 0, 1];
+            const baseIndex = vertices.length / 3;
+            
+            vertices.push(x0, y0, z1);
+            normals.push(...normal);
+            colors.push(...waterColor);
+            materialIds.push(waterMaterialId);
+            
+            vertices.push(x1, y0, z1);
+            normals.push(...normal);
+            colors.push(...waterColor);
+            materialIds.push(waterMaterialId);
+            
+            vertices.push(x1, y1, z1);
+            normals.push(...normal);
+            colors.push(...waterColor);
+            materialIds.push(waterMaterialId);
+            
+            vertices.push(x0, y1, z1);
+            normals.push(...normal);
+            colors.push(...waterColor);
+            materialIds.push(waterMaterialId);
+            
+            indices.push(baseIndex, baseIndex + 1, baseIndex + 2);
+            indices.push(baseIndex, baseIndex + 2, baseIndex + 3);
+            waterFaceCount++;
+          }
+          
+          // -Z face (front)
+          if (!hasWater(x, z - 1, y)) {
+            const normal = [0, 0, -1];
+            const baseIndex = vertices.length / 3;
+            
+            vertices.push(x0, y0, z0);
+            normals.push(...normal);
+            colors.push(...waterColor);
+            materialIds.push(waterMaterialId);
+            
+            vertices.push(x0, y1, z0);
+            normals.push(...normal);
+            colors.push(...waterColor);
+            materialIds.push(waterMaterialId);
+            
+            vertices.push(x1, y1, z0);
+            normals.push(...normal);
+            colors.push(...waterColor);
+            materialIds.push(waterMaterialId);
+            
+            vertices.push(x1, y0, z0);
+            normals.push(...normal);
+            colors.push(...waterColor);
+            materialIds.push(waterMaterialId);
+            
+            indices.push(baseIndex, baseIndex + 1, baseIndex + 2);
+            indices.push(baseIndex, baseIndex + 2, baseIndex + 3);
+            waterFaceCount++;
+          }
+        }
+      }
+    }
+    
+    if (waterVoxelCount > 0) {
+      console.log(`  → Generated ${waterVoxelCount} water voxels (${waterFaceCount} faces)`);
+      console.log(`  → Water height range: ${minWater.toFixed(2)} - ${maxWater.toFixed(2)} voxels`);
+      console.log(`  → Water world coords: ${(minWater * this.voxelSize).toFixed(2)}m - ${(maxWater * this.voxelSize).toFixed(2)}m`);
+    } else {
+      console.log(`  → No water generated (all water below terrain)`);
     }
     
     const buildTime = performance.now() - startTime;

@@ -213,6 +213,13 @@ app.get('/worlds/:worldId/mesh', (req, res) => {
   });
 });
 
+// Render SVDAG renderer page (hierarchical)
+app.get('/worlds/:worldId/svdag', (req, res) => {
+  res.render('worldSvdag', {
+    worldId: req.params.worldId
+  });
+});
+
 app.listen(PORT, () => {
   console.log(`🚀 Server running at http://localhost:${PORT}`);
   console.log(`📁 Storage directory: ${STORAGE_DIR}`);
