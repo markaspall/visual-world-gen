@@ -218,6 +218,19 @@
       <span class="label">Direction:</span>
       <span class="value" id="direction">--</span>
     </div>
+    <hr style="border: none; border-top: 1px solid #333; margin: 10px 0;">
+    <div class="stat">
+      <span class="label">🎯 Center Hit:</span>
+      <span class="value" id="centerHit">--</span>
+    </div>
+    <div class="stat">
+      <span class="label">DAG Depth:</span>
+      <span class="value" id="centerDepth">--</span>
+    </div>
+    <div class="stat">
+      <span class="label">Distance:</span>
+      <span class="value" id="centerDist">--</span>
+    </div>
   </div>
   
   <div id="controls">
@@ -240,65 +253,15 @@
     <h4>🐛 Debug Modes</h4>
     <label>
       <input type="checkbox" id="debug-flat-colors">
-      <span>Flat Colors (No Lighting)</span>
-    </label>
-    <label>
-      <input type="checkbox" id="debug-step-count">
-      <span>Step Count Heatmap</span>
-    </label>
-    <label>
-      <input type="checkbox" id="debug-distance">
-      <span>Distance Heatmap</span>
-    </label>
-    <label>
-      <input type="checkbox" id="debug-normals">
-      <span>Normals Visualization</span>
+      <span>🎨 Block ID Colors</span>
     </label>
     <label>
       <input type="checkbox" id="debug-dag-levels">
-      <span>DAG Depth Heatmap</span>
+      <span>🌳 DAG Depth (Red→Blue)</span>
     </label>
     <label>
-      <input type="checkbox" id="debug-leaf-size">
-      <span>Leaf Size Visualization</span>
-    </label>
-    <label>
-      <input type="checkbox" id="debug-performance">
-      <span>Performance (Step Count)</span>
-    </label>
-    <label>
-      <input type="checkbox" id="show-terrain" checked>
-      <span>Show Terrain</span>
-    </label>
-    <label>
-      <input type="checkbox" id="show-water" checked>
-      <span>Show Water</span>
-    </label>
-    
-    <h3>Performance Toggles</h3>
-    <label>
-      <input type="checkbox" id="enable-shadows" checked>
-      <span>Enable Shadows</span>
-    </label>
-    <label>
-      <input type="checkbox" id="enable-reflections" checked>
-      <span>Enable Water Reflections</span>
-    </label>
-    <label>
-      <input type="checkbox" id="enable-fog" checked>
-      <span>Enable Atmospheric Fog</span>
-    </label>
-    <label>
-      <input type="checkbox" id="enable-early-exit" checked>
-      <span>Early Sky Exit (Optimization)</span>
-    </label>
-    <label>
-      <input type="checkbox" id="enable-water-animation" checked>
-      <span>Water Wave Animation</span>
-    </label>
-    <label>
-      <input type="checkbox" id="increase-shadow-bias">
-      <span>Fix Shadow Acne (High Bias)</span>
+      <input type="checkbox" id="debug-step-count">
+      <span>⚡ Step Count Heatmap</span>
     </label>
   </div>
   
@@ -337,6 +300,11 @@
       const rot = renderer.camera.rotation;
       document.getElementById('position').textContent = `${pos[0].toFixed(1)}, ${pos[1].toFixed(1)}, ${pos[2].toFixed(1)}`;
       document.getElementById('direction').textContent = `${(rot[0] * 180 / Math.PI).toFixed(0)}°, ${(rot[1] * 180 / Math.PI).toFixed(0)}°`;
+      
+      // Center ray info (crosshair visible on screen)
+      document.getElementById('centerHit').textContent = 'See crosshair';
+      document.getElementById('centerDepth').textContent = 'Color = depth';
+      document.getElementById('centerDist').textContent = 'Debug mode';
     }
     
     // Set canvas size with render scale (0.5 = half resolution for 4× faster rendering)
@@ -393,126 +361,35 @@
       // Update info panel
       updateInfo(renderer);
       
-      // Setup debug checkboxes
+      // Setup debug checkboxes - mutually exclusive
       document.getElementById('debug-flat-colors').addEventListener('change', (e) => {
-        renderer.debugFlags.debugWaterValues = e.target.checked; // Repurpose this flag
-      });
-      
-      document.getElementById('debug-step-count').addEventListener('change', (e) => {
-        renderer.debugFlags.debugStepCount = e.target.checked;
+        renderer.debugFlags.debugWaterValues = e.target.checked; // Block ID mode
         if (e.target.checked) {
-          // Uncheck others
-          document.getElementById('debug-distance').checked = false;
-          document.getElementById('debug-normals').checked = false;
           document.getElementById('debug-dag-levels').checked = false;
-          renderer.debugFlags.debugDistance = false;
-          renderer.debugFlags.debugNormals = false;
-          renderer.debugFlags.debugDAGLevels = false;
-        }
-      });
-      
-      document.getElementById('debug-distance').addEventListener('change', (e) => {
-        renderer.debugFlags.debugDistance = e.target.checked;
-        if (e.target.checked) {
           document.getElementById('debug-step-count').checked = false;
-          document.getElementById('debug-normals').checked = false;
-          document.getElementById('debug-dag-levels').checked = false;
-          renderer.debugFlags.debugStepCount = false;
-          renderer.debugFlags.debugNormals = false;
           renderer.debugFlags.debugDAGLevels = false;
-        }
-      });
-      
-      document.getElementById('debug-normals').addEventListener('change', (e) => {
-        renderer.debugFlags.debugNormals = e.target.checked;
-        if (e.target.checked) {
-          document.getElementById('debug-step-count').checked = false;
-          document.getElementById('debug-distance').checked = false;
-          document.getElementById('debug-dag-levels').checked = false;
           renderer.debugFlags.debugStepCount = false;
-          renderer.debugFlags.debugDistance = false;
-          renderer.debugFlags.debugDAGLevels = false;
         }
       });
       
       document.getElementById('debug-dag-levels').addEventListener('change', (e) => {
         renderer.debugFlags.debugDAGLevels = e.target.checked;
         if (e.target.checked) {
-          document.getElementById('debug-step-count').checked = false;
-          document.getElementById('debug-distance').checked = false;
-          document.getElementById('debug-normals').checked = false;
-          document.getElementById('debug-leaf-size').checked = false;
-          renderer.debugFlags.debugStepCount = false;
-          renderer.debugFlags.debugDistance = false;
-          renderer.debugFlags.debugNormals = false;
-          renderer.debugFlags.debugLeafSize = false;
-        }
-      });
-      
-      document.getElementById('debug-leaf-size').addEventListener('change', (e) => {
-        renderer.debugFlags.debugLeafSize = e.target.checked;
-        if (e.target.checked) {
-          document.getElementById('debug-step-count').checked = false;
-          document.getElementById('debug-distance').checked = false;
-          document.getElementById('debug-normals').checked = false;
-          document.getElementById('debug-dag-levels').checked = false;
-          document.getElementById('debug-performance').checked = false;
-          renderer.debugFlags.debugStepCount = false;
-          renderer.debugFlags.debugDistance = false;
-          renderer.debugFlags.debugNormals = false;
-          renderer.debugFlags.debugDAGLevels = false;
-          renderer.debugFlags.debugPerformance = false;
-        }
-      });
-      
-      document.getElementById('debug-performance').addEventListener('change', (e) => {
-        renderer.debugFlags.debugPerformance = e.target.checked;
-        if (e.target.checked) {
-          document.getElementById('debug-step-count').checked = false;
-          document.getElementById('debug-distance').checked = false;
-          document.getElementById('debug-normals').checked = false;
-          document.getElementById('debug-dag-levels').checked = false;
-          document.getElementById('debug-leaf-size').checked = false;
           document.getElementById('debug-flat-colors').checked = false;
-          renderer.debugFlags.debugStepCount = false;
-          renderer.debugFlags.debugDistance = false;
-          renderer.debugFlags.debugNormals = false;
-          renderer.debugFlags.debugDAGLevels = false;
-          renderer.debugFlags.debugLeafSize = false;
+          document.getElementById('debug-step-count').checked = false;
           renderer.debugFlags.debugWaterValues = false;
+          renderer.debugFlags.debugStepCount = false;
         }
       });
       
-      document.getElementById('show-terrain').addEventListener('change', (e) => {
-        renderer.debugFlags.showTerrain = e.target.checked;
-      });
-      
-      document.getElementById('show-water').addEventListener('change', (e) => {
-        renderer.debugFlags.showWater = e.target.checked;
-      });
-      
-      document.getElementById('enable-shadows').addEventListener('change', (e) => {
-        renderer.perfFlags.enableShadows = e.target.checked;
-      });
-      
-      document.getElementById('enable-reflections').addEventListener('change', (e) => {
-        renderer.perfFlags.enableReflections = e.target.checked;
-      });
-      
-      document.getElementById('enable-fog').addEventListener('change', (e) => {
-        renderer.perfFlags.enableFog = e.target.checked;
-      });
-      
-      document.getElementById('enable-early-exit').addEventListener('change', (e) => {
-        renderer.perfFlags.enableEarlyExit = e.target.checked;
-      });
-      
-      document.getElementById('enable-water-animation').addEventListener('change', (e) => {
-        renderer.perfFlags.enableWaterAnimation = e.target.checked;
-      });
-      
-      document.getElementById('increase-shadow-bias').addEventListener('change', (e) => {
-        renderer.perfFlags.increaseShadowBias = e.target.checked;
+      document.getElementById('debug-step-count').addEventListener('change', (e) => {
+        renderer.debugFlags.debugStepCount = e.target.checked;
+        if (e.target.checked) {
+          document.getElementById('debug-flat-colors').checked = false;
+          document.getElementById('debug-dag-levels').checked = false;
+          renderer.debugFlags.debugWaterValues = false;
+          renderer.debugFlags.debugDAGLevels = false;
+        }
       });
       
       // Camera controls

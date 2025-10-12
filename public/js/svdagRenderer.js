@@ -192,7 +192,8 @@ export class SvdagRenderer {
       enableFog: true,
       enableEarlyExit: true,
       enableWaterAnimation: true,
-      increaseShadowBias: false
+      increaseShadowBias: false,
+      showVoxelGrid: false
     };
     
     this.time = 0;
@@ -314,8 +315,7 @@ export class SvdagRenderer {
         const idx = srcZ * sourceSize + srcX;
         
         const terrainHeight = Math.floor(heightData[idx] * 256);
-        const waterLevel = Math.floor(waterData[idx] * 256);
-        const blockType = blocksData[idx] || 1; // Default to grass if no block type
+        const blockType = blocksData[idx] || 1;
         
         if (terrainHeight > maxHeight) maxHeight = terrainHeight;
         
@@ -324,15 +324,6 @@ export class SvdagRenderer {
           const voxelIdx = z * gridSize * gridHeight + y * gridSize + x;
           voxelGrid[voxelIdx] = blockType;
           filledVoxels++;
-        }
-        
-        // Fill water (if above terrain)
-        if (waterLevel > terrainHeight) {
-          for (let y = terrainHeight + 1; y <= waterLevel && y < gridHeight; y++) {
-            const voxelIdx = z * gridSize * gridHeight + y * gridSize + x;
-            voxelGrid[voxelIdx] = 6; // Water block ID
-            filledVoxels++;
-          }
         }
       }
     }
@@ -394,9 +385,9 @@ export class SvdagRenderer {
   }
 
   createBuffers() {
-    // Camera buffer
+    // Camera buffer (76 bytes, round up to 80 for alignment)
     this.cameraBuffer = this.device.createBuffer({
-      size: 256,
+      size: 80,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
     });
     
@@ -514,10 +505,7 @@ export class SvdagRenderer {
         { binding: 1, resource: { buffer: this.svdagParamsBuffer } },
         { binding: 2, resource: { buffer: this.svdagNodesBuffer } },
         { binding: 3, resource: { buffer: this.svdagLeavesBuffer } },
-        { binding: 4, resource: this.outputTexture.createView() },
-        { binding: 5, resource: { buffer: this.materialsBuffer } },
-        { binding: 6, resource: { buffer: this.timeParamsBuffer } },
-        { binding: 7, resource: { buffer: this.animationsBuffer } }
+        { binding: 4, resource: this.outputTexture.createView() }
       ]
     });
   }
@@ -610,26 +598,10 @@ export class SvdagRenderer {
       ...forward, aspect,
       ...right, 0,
       ...up, 0,
-      this.debugFlags.showTerrain ? 1.0 : 0.0,
-      this.debugFlags.showWater ? 1.0 : 0.0,
-      this.debugFlags.debugWaterValues ? 1.0 : 0.0,  // Flat colors mode
-      0.0,  // useLOD (not used in SVDAG)
-      0.0,  // debugLODLevels
-      this.debugFlags.debugStepCount ? 1.0 : 0.0,
-      this.debugFlags.debugDistance ? 1.0 : 0.0,
-      this.debugFlags.debugNormals ? 1.0 : 0.0,
-      this.debugFlags.debugDAGLevels ? 1.0 : 0.0,
-      this.debugFlags.debugLeafSize ? 1.0 : 0.0,
-      this.debugFlags.debugPerformance ? 1.0 : 0.0,
-      0,
-      // Performance flags
-      this.perfFlags.enableShadows ? 1.0 : 0.0,
-      this.perfFlags.enableReflections ? 1.0 : 0.0,
-      this.perfFlags.enableFog ? 1.0 : 0.0,
-      this.perfFlags.enableEarlyExit ? 1.0 : 0.0,
-      this.perfFlags.enableWaterAnimation ? 1.0 : 0.0,
-      this.perfFlags.increaseShadowBias ? 1.0 : 0.0,
-      0, 0
+      this.debugFlags.debugWaterValues ? 1.0 : 0.0,  // debug_block_id (repurposed)
+      this.debugFlags.debugDAGLevels ? 1.0 : 0.0,     // debug_dag_level
+      this.debugFlags.debugStepCount ? 1.0 : 0.0,     // debug_step_count
+      0.0  // _pad3
     ]);
     
     this.device.queue.writeBuffer(this.cameraBuffer, 0, cameraData);
@@ -645,11 +617,17 @@ export class SvdagRenderer {
 
   updateTime() {
     this.time += 0.016;
+    
+    // Convert elapsed time to time of day (0-1 cycle)
+    // Full day/night cycle every 60 seconds
+    const dayNightCycleSeconds = 60.0;
+    const timeOfDay = (this.time / dayNightCycleSeconds) % 1.0;
+    
     const timeData = new Float32Array([
-      this.time,
-      0.5,
-      200.0,
-      1.0
+      this.time,        // time (raw, for animations)
+      timeOfDay,        // timeOfDay (0-1 cycle, for sun/lighting)
+      200.0,            // fogDistance (max fog distance)
+      0.005             // fogDensity (not used anymore, calculated in shader)
     ]);
     this.device.queue.writeBuffer(this.timeParamsBuffer, 0, timeData);
   }
