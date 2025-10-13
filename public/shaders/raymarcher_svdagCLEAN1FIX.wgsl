@@ -31,22 +31,10 @@ struct Hit {
 }
 
 struct StackEntry {
-  packed_idx_depth: u32,  // 4 bytes - node_idx(16 bits) | depth(8 bits) | unused(8 bits)
-  pos_xyz: vec3<f32>,     // 12 bytes - full precision position
-}
-// Total: 16 bytes (was 20 bytes = 20% reduction)
-// Compromise: Smaller than 20, precise enough for AABB math
-
-fn packIdxDepth(node_idx: u32, depth: u32) -> u32 {
-  return (node_idx & 0xFFFFu) | ((depth & 0xFFu) << 16u);
-}
-
-fn unpackNodeIdx(packed: u32) -> u32 {
-  return packed & 0xFFFFu;  // Lower 16 bits
-}
-
-fn unpackDepth(packed: u32) -> u32 {
-  return (packed >> 16u) & 0xFFu;  // Next 8 bits
+  node_idx: u32,
+  node_pos: vec3<f32>,
+  node_size: f32,
+  t_entry: f32,
 }
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -55,7 +43,7 @@ fn unpackDepth(packed: u32) -> u32 {
 @group(0) @binding(3) var<storage, read> svdag_leaves: array<u32>;
 @group(0) @binding(4) var outputTexture: texture_storage_2d<rgba8unorm, write>;
 
-const MAX_STACK_DEPTH = 17;  // 16 bytes per entry = 416 bytes (was 400 bytes at depth 20)
+const MAX_STACK_DEPTH = 24;  // Needs to be large enough to prevent stack overflow holes
 const MAX_STEPS = 256;
 
 // ============================================================================
@@ -163,28 +151,19 @@ fn raymarchSVDAG(ray_origin: vec3<f32>, ray_dir: vec3<f32>) -> Hit {
   var stack: array<StackEntry, MAX_STACK_DEPTH>;
   var stack_ptr = 0;
   
-  // Initialize root node
-  stack[0].packed_idx_depth = packIdxDepth(svdag_params.root_index, 0u);
-  stack[0].pos_xyz = world_center;
+  stack[0].node_idx = svdag_params.root_index;
+  stack[0].node_pos = world_center;
+  stack[0].node_size = svdag_params.world_size;
+  stack[0].t_entry = t_start;
   
   for (var step = 0; step < MAX_STEPS && stack_ptr >= 0; step++) {
     let entry = stack[stack_ptr];
     stack_ptr -= 1;
     
-    // Unpack entry
-    let node_idx = unpackNodeIdx(entry.packed_idx_depth);
-    let node_depth = unpackDepth(entry.packed_idx_depth);
-    let node_center = entry.pos_xyz;
-    let node_size = svdag_params.world_size / f32(1u << node_depth);  // Derive size from depth
-    
-    // Recalculate t_entry from AABB
-    let node_half = node_size * 0.5;
-    let node_min = node_center - vec3<f32>(node_half);
-    let node_max = node_center + vec3<f32>(node_half);
-    let t0_calc = (node_min - ray_origin) * inv_ray_dir;
-    let t1_calc = (node_max - ray_origin) * inv_ray_dir;
-    let tmin_calc = min(t0_calc, t1_calc);
-    current_t = max(max(max(tmin_calc.x, tmin_calc.y), tmin_calc.z), 0.0);
+    let node_idx = entry.node_idx;
+    let node_center = entry.node_pos;
+    let node_size = entry.node_size;
+    current_t = entry.t_entry;
     
     if (node_idx >= svdag_params.node_count) {
       continue;
@@ -272,10 +251,14 @@ fn raymarchSVDAG(ray_origin: vec3<f32>, ray_dir: vec3<f32>) -> Hit {
         let child_tmax = min(min(tmax_vec.x, tmax_vec.y), tmax_vec.z);
         
         if (child_tmin <= child_tmax && child_tmax >= current_t) {
+          let child_t = max(child_tmin, current_t);
+          
           if (stack_ptr + 1 < MAX_STACK_DEPTH) {
             stack_ptr += 1;
-            stack[stack_ptr].packed_idx_depth = packIdxDepth(child_idx, node_depth + 1u);
-            stack[stack_ptr].pos_xyz = child_center;
+            stack[stack_ptr].node_idx = child_idx;
+            stack[stack_ptr].node_pos = child_center;
+            stack[stack_ptr].node_size = child_size;
+            stack[stack_ptr].t_entry = child_t;
           }
         }
       }

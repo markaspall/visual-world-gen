@@ -509,18 +509,6 @@ export class SvdagRenderer {
     
     // SVDAG leaves buffer
     console.log('Leaves buffer sample (first 20):', this.svdag.leavesBuffer.slice(0, 20));
-    
-    // Center pixel data buffer (for readback)
-    this.centerPixelDataBuffer = this.device.createBuffer({
-      size: 36, // 9 u32 values = 36 bytes
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
-    });
-    
-    // Staging buffer for reading back center pixel data
-    this.centerPixelStagingBuffer = this.device.createBuffer({
-      size: 36,
-      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-    });
     console.log('Leaves buffer non-zero count:', this.svdag.leavesBuffer.filter(x => x > 0).length);
     
     this.svdagLeavesBuffer = this.device.createBuffer({
@@ -594,8 +582,7 @@ export class SvdagRenderer {
         { binding: 1, resource: { buffer: this.svdagParamsBuffer } },
         { binding: 2, resource: { buffer: this.svdagNodesBuffer } },
         { binding: 3, resource: { buffer: this.svdagLeavesBuffer } },
-        { binding: 4, resource: this.outputTexture.createView() },
-        { binding: 5, resource: { buffer: this.centerPixelDataBuffer } }
+        { binding: 4, resource: this.outputTexture.createView() }
       ]
     });
   }
@@ -756,58 +743,7 @@ export class SvdagRenderer {
     renderPass.draw(6);
     renderPass.end();
     
-    // Only copy and read if not currently reading and enough time has passed
-    const shouldRead = !this.isReadingCenterPixel && 
-                       (!this.lastReadFrame || performance.now() - this.lastReadFrame > 100);
-    
-    if (shouldRead) {
-      // Copy center pixel data to staging buffer for readback
-      commandEncoder.copyBufferToBuffer(
-        this.centerPixelDataBuffer, 0,
-        this.centerPixelStagingBuffer, 0,
-        36
-      );
-    }
-    
     this.device.queue.submit([commandEncoder.finish()]);
-    
-    // DISABLED: Crosshair readback causing buffer errors
-    // if (shouldRead) {
-    //   this.device.queue.onSubmittedWorkDone().then(() => {
-    //     this.readCenterPixelData();
-    //   });
-    // }
-  }
-  
-  async readCenterPixelData() {
-    this.lastReadFrame = performance.now();
-    this.isReadingCenterPixel = true;
-    
-    try {
-      await this.centerPixelStagingBuffer.mapAsync(GPUMapMode.READ);
-      const data = new Uint32Array(this.centerPixelStagingBuffer.getMappedRange());
-      
-      // Store for display
-      window.centerPixelInfo = {
-        blockId: data[0],
-        nodeIdx: data[1],
-        leafIdx: data[2],
-        depth: data[3],
-        steps: data[4],
-        distance: data[5] / 100.0,
-        normal: [
-          (data[6] / 100.0) - 1.0,
-          (data[7] / 100.0) - 1.0,
-          (data[8] / 100.0) - 1.0
-        ]
-      };
-      
-      this.centerPixelStagingBuffer.unmap();
-    } catch (error) {
-      console.error('Failed to read center pixel data:', error);
-    } finally {
-      this.isReadingCenterPixel = false;
-    }
   }
 
   resize() {
