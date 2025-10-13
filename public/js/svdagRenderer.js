@@ -17,23 +17,37 @@ class SVDAGBuilder {
     console.log('Grid size:', this.size, 'Depth:', this.maxDepth, 'Total voxels:', voxelGrid.length);
     const startTime = performance.now();
     
-    console.log('Building octree...');
+    console.log('⏱️ Phase 1: Building octree...');
+    const octreeStart = performance.now();
     const root = this.buildNode(voxelGrid, 0, 0, 0, this.size, 0);
-    console.log('Octree built, flattening to DAG...');
+    const octreeTime = ((performance.now() - octreeStart) / 1000).toFixed(2);
+    console.log(`✅ Octree built in ${octreeTime}s`);
     
+    console.log('⏱️ Phase 2: Flattening to DAG (deduplicating nodes)...');
+    const flattenStart = performance.now();
+    this.flattenProgress = 0;
+    this.flattenTotal = 0;
     const rootIdx = this.flattenNode(root);
-    console.log('DAG flattened!');
+    const flattenTime = ((performance.now() - flattenStart) / 1000).toFixed(2);
+    console.log(`✅ DAG flattened in ${flattenTime}s`);
     
     const buildTime = (performance.now() - startTime).toFixed(2);
     
+    const totalTimeS = (buildTime / 1000).toFixed(2);
     const stats = {
       totalNodes: Math.floor(this.nodes.length / 3),
       totalLeaves: this.leaves.length,
-      buildTimeMs: buildTime,
+      buildTimeS: totalTimeS,
+      octreeTimeS: octreeTime,
+      flattenTimeS: flattenTime,
       compressionRatio: (1 - (this.nodes.length + this.leaves.length) / voxelGrid.length).toFixed(3),
+      dedupSavings: this.nodeMap.size
     };
     
-    console.log('✅ SVDAG built successfully!', stats);
+    console.log('✅ SVDAG built successfully!');
+    console.log(`   Total time: ${totalTimeS}s (Octree: ${octreeTime}s, Flatten: ${flattenTime}s)`);
+    console.log(`   Nodes: ${stats.totalNodes}, Leaves: ${stats.totalLeaves}`);
+    console.log(`   Compression: ${stats.compressionRatio} (DAG saved ${stats.dedupSavings} duplicate nodes)`);
     
     // Debug: Show first few nodes
     console.log('First 20 node values:', this.nodes.slice(0, 20));
@@ -87,7 +101,15 @@ class SVDAGBuilder {
 
   flattenNode(node) {
     if (!node) {
-      return 0;
+      return 0; // Null nodes = air, no index needed
+    }
+
+    // Progress tracking (log every 10000 nodes)
+    this.flattenProgress = (this.flattenProgress || 0) + 1;
+    if (this.flattenProgress % 10000 === 0) {
+      const nodeCount = Math.floor(this.nodes.length / 3);
+      const mapSize = this.nodeMap.size;
+      console.log(`  ... processed ${this.flattenProgress} nodes, created ${nodeCount} unique nodes, DAG saved ${mapSize} duplicates`);
     }
 
     let nodeIdx;
@@ -141,17 +163,25 @@ class SVDAGBuilder {
   }
 
   hashNode(node) {
-    if (node.isLeaf) {
-      return `L${node.blockId}`;
+    // Compute hash bottom-up (cache it after first computation)
+    if (node._hash !== undefined) {
+      return node._hash;
     }
     
-    let hash = `N${node.childMask}`;
+    if (node.isLeaf) {
+      node._hash = `L${node.blockId}`;
+      return node._hash;
+    }
+    
+    // For inner nodes, hash child indices (computed during flatten)
+    const parts = [node.childMask];
     for (let i = 0; i < 8; i++) {
       if (node.childMask & (1 << i)) {
-        hash += `_${this.hashNode(node.children[i])}`;
+        parts.push(this.hashNode(node.children[i]));
       }
     }
-    return hash;
+    node._hash = parts.join('|');
+    return node._hash;
   }
 
   getVoxelIndex(x, y, z) {
@@ -301,7 +331,7 @@ export class SvdagRenderer {
       ? await this.loadPNGAsFloatArray(files.waterHeight)
       : new Float32Array(512 * 512).fill(0);
     
-    // High resolution: 256x256x256 (good balance of quality vs build time)
+    // High resolution: 256x256x256 @ 0.66m voxels (512³ uses too much memory!)
     const sourceSize = 512;
     const gridSize = 256;
     const gridHeight = 256;
@@ -320,15 +350,16 @@ export class SvdagRenderer {
       this.fillTestPattern(voxelGrid, gridSize, gridHeight, window.svdagTestPattern);
       filledVoxels = voxelGrid.filter(v => v > 0).length;
     } else {
-      // Fill voxel grid - sample from 512x512 source to 256x256x256 grid
+      // Fill voxel grid - downsample from 512x512 source to 256x256x256 grid
       for (let x = 0; x < gridSize; x++) {
         for (let z = 0; z < gridSize; z++) {
-          // Sample from source heightmap (every 2nd pixel)
+          // Sample every 2nd pixel
           const srcX = x * 2;
           const srcZ = z * 2;
           const idx = srcZ * sourceSize + srcX;
           
-          const terrainHeight = Math.floor(heightData[idx] * 256);
+          const terrainHeight = Math.floor(heightData[idx] * 256);  // Scale to 256 height
+          const waterDepth = waterData[idx];  // 0-1, represents water level
           const blockType = blocksData[idx] || 6;
           
           if (terrainHeight > maxHeight) maxHeight = terrainHeight;
@@ -338,6 +369,16 @@ export class SvdagRenderer {
             const voxelIdx = z * gridSize * gridHeight + y * gridSize + x;
             voxelGrid[voxelIdx] = blockType;
             filledVoxels++;
+          }
+          
+          // Fill water above terrain (if water depth > 0)
+          if (waterDepth > 0.01) {
+            const waterHeight = Math.floor(waterDepth * 256);  // Scale water height
+            for (let y = terrainHeight + 1; y <= waterHeight && y < gridHeight; y++) {
+              const voxelIdx = z * gridSize * gridHeight + y * gridSize + x;
+              voxelGrid[voxelIdx] = 6;  // Material ID 6 = Water
+              filledVoxels++;
+            }
           }
         }
       }
@@ -354,7 +395,9 @@ export class SvdagRenderer {
     
     // Build SVDAG with depth 8 (2^8 = 256)
     const builder = new SVDAGBuilder(gridSize, 8);
-    console.log('✅ Building 256×256×256 SVDAG (should take ~5 seconds)...');
+    console.log('✅ Building 256×256×256 SVDAG (should take 5-10 seconds)...');
+    
+    // Use requestIdleCallback or setTimeout to yield periodically during build
     this.svdag = builder.build(voxelGrid);
     
     console.log('SVDAG compression:', this.svdag.stats.compressionRatio);
@@ -476,14 +519,14 @@ export class SvdagRenderer {
     });
     
     // SVDAG params buffer
-    const gridSize = 256; // High resolution
-    const voxelSize = 0.666666; // 256 * 0.666 ≈ 170m world (same physical size)
-    const worldSize = gridSize * voxelSize; // ~170 meters total
+    const gridSize = 256; // High resolution (512³ uses too much RAM)
+    const voxelSize = 0.666666; // 0.66m per voxel
+    const worldSize = gridSize * voxelSize; // ~170 meters total (same physical world)
     
     const svdagParamsData = new Float32Array([
       this.svdag.rootIdx,
       8,  // max_depth for 256^3 (2^8 = 256)
-      voxelSize,  // leaf_size (0.666m per voxel)
+      voxelSize,  // leaf_size (0.66m per voxel)
       this.svdag.nodesBuffer.length,
       worldSize,  // world_size (~170m)
       0, 0, 0
@@ -537,32 +580,29 @@ export class SvdagRenderer {
     new Uint32Array(this.svdagLeavesBuffer.getMappedRange()).set(this.svdag.leavesBuffer);
     this.svdagLeavesBuffer.unmap();
     
-    // Materials buffer - load from world data
+    // Materials buffer - matches BlockMaterial struct in shader
     const materials = [
-      { id: 0, color: [0, 0, 0], transparent: 0, emissive: 0, reflective: 0, refractive: 1 }, // Air
-      { id: 1, color: [0.27, 0.71, 0.27], transparent: 0, emissive: 0, reflective: 0, refractive: 1 }, // Grass (green)
-      { id: 2, color: [0.55, 0.35, 0.24], transparent: 0, emissive: 0, reflective: 0, refractive: 1 }, // Dirt (brown)
-      { id: 3, color: [0.5, 0.5, 0.5], transparent: 0, emissive: 0, reflective: 0, refractive: 1 }, // Stone (gray)
-      { id: 4, color: [0.93, 0.79, 0.69], transparent: 0, emissive: 0, reflective: 0, refractive: 1 }, // Sand (tan)
-      { id: 5, color: [1.0, 1.0, 1.0], transparent: 0, emissive: 0, reflective: 0.3, refractive: 1 }, // Snow (white)
-      { id: 6, color: [0.12, 0.56, 1.0], transparent: 0.8, emissive: 0, reflective: 0.2, refractive: 1.33 }, // Water (blue)
+      { id: 0, color: [0, 0, 0], transparent: 0, emissive: 0, reflective: 0 }, // Air
+      { id: 1, color: [0.27, 0.71, 0.27], transparent: 0, emissive: 0, reflective: 0 }, // Grass (green)
+      { id: 2, color: [0.55, 0.35, 0.24], transparent: 0, emissive: 0, reflective: 0 }, // Dirt (brown)
+      { id: 3, color: [0.5, 0.5, 0.5], transparent: 0, emissive: 0, reflective: 0 }, // Stone (gray)
+      { id: 4, color: [0.93, 0.79, 0.69], transparent: 0, emissive: 0, reflective: 0 }, // Sand (tan)
+      { id: 5, color: [1.0, 1.0, 1.0], transparent: 0, emissive: 0, reflective: 0.3 }, // Snow (white, reflective)
+      { id: 6, color: [0.12, 0.56, 1.0], transparent: 0.8, emissive: 0, reflective: 0.2 }, // Water (blue, transparent)
     ];
     
-    const materialsData = new Float32Array(materials.length * 12);
+    // BlockMaterial struct: colorR, colorG, colorB, transparent, emissive, reflective, _pad1, _pad2 (8 floats = 32 bytes)
+    const materialsData = new Float32Array(materials.length * 8);
     materials.forEach((mat, i) => {
-      const offset = i * 12;
-      materialsData[offset + 0] = mat.id;
-      materialsData[offset + 1] = mat.color[0];
-      materialsData[offset + 2] = mat.color[1];
-      materialsData[offset + 3] = mat.color[2];
-      materialsData[offset + 4] = mat.transparent;
-      materialsData[offset + 5] = mat.emissive;
-      materialsData[offset + 6] = mat.reflective;
-      materialsData[offset + 7] = mat.refractive;
-      materialsData[offset + 8] = 0; // animationId
-      materialsData[offset + 9] = 0; // _pad1
-      materialsData[offset + 10] = 0; // _pad2
-      materialsData[offset + 11] = 0; // _pad3
+      const offset = i * 8;
+      materialsData[offset + 0] = mat.color[0];  // colorR
+      materialsData[offset + 1] = mat.color[1];  // colorG
+      materialsData[offset + 2] = mat.color[2];  // colorB
+      materialsData[offset + 3] = mat.transparent;
+      materialsData[offset + 4] = mat.emissive;
+      materialsData[offset + 5] = mat.reflective;
+      materialsData[offset + 6] = 0;  // _pad1
+      materialsData[offset + 7] = 0;  // _pad2
     });
     
     console.log('Materials loaded:', materials.length, 'types');
@@ -600,7 +640,8 @@ export class SvdagRenderer {
         { binding: 1, resource: { buffer: this.svdagParamsBuffer } },
         { binding: 2, resource: { buffer: this.svdagNodesBuffer } },
         { binding: 3, resource: { buffer: this.svdagLeavesBuffer } },
-        { binding: 4, resource: this.outputTexture.createView() }
+        { binding: 4, resource: this.outputTexture.createView() },
+        { binding: 5, resource: { buffer: this.materialsBuffer } }
       ]
     });
   }
@@ -721,7 +762,7 @@ export class SvdagRenderer {
     if (!this._loggedCamera) {
       console.log('Camera position:', this.camera.position);
       console.log('Camera forward:', forward);
-      console.log('World bounds: [0, 0, 0] to [170, 170, 170] (256³ voxels @ 0.666m each)');
+      console.log('World bounds: [0, 0, 0] to [170, 170, 170] (256³ voxels @ 0.66m each)');
       this._loggedCamera = true;
     }
   }

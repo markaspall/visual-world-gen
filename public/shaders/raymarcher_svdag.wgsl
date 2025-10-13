@@ -24,6 +24,17 @@ struct SVDAGParams {
   _pad3: f32,
 }
 
+struct BlockMaterial {
+  colorR: f32,
+  colorG: f32,
+  colorB: f32,
+  transparent: f32,
+  emissive: f32,
+  reflective: f32,
+  _pad1: f32,
+  _pad2: f32,
+}
+
 struct Hit {
   normal: vec3<f32>,
   block_id: u32,
@@ -54,9 +65,29 @@ fn unpackDepth(packed: u32) -> u32 {
 @group(0) @binding(2) var<storage, read> svdag_nodes: array<u32>;
 @group(0) @binding(3) var<storage, read> svdag_leaves: array<u32>;
 @group(0) @binding(4) var outputTexture: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(5) var<storage, read> materials: array<BlockMaterial>;
 
 const MAX_STACK_DEPTH = 17;  // 16 bytes per entry = 272 bytes
 const MAX_STEPS = 128;  // Reduced from 256 - most rays hit in <50 steps
+
+// ============================================================================
+// Material System
+// ============================================================================
+
+fn getMaterial(block_id: u32) -> BlockMaterial {
+  if (block_id == 0u || block_id >= arrayLength(&materials)) {
+    // Default material (shouldn't happen)
+    var mat: BlockMaterial;
+    mat.colorR = 0.5;
+    mat.colorG = 0.5;
+    mat.colorB = 0.5;
+    mat.transparent = 0.0;
+    mat.emissive = 0.0;
+    mat.reflective = 0.0;
+    return mat;
+  }
+  return materials[block_id];
+}
 
 // ============================================================================
 // AABB Intersection
@@ -308,20 +339,25 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   // Raymarch
   let hit = raymarchSVDAG(camera.position, rayDir);
   
-  // Color based on face normal
+  // Color based on material + lighting
   var color = vec3<f32>(0.5, 0.7, 1.0); // Sky blue
   
   if (hit.block_id > 0u) {
-    // Simple flat color based on which face was hit
-    if (abs(hit.normal.y) > 0.5) {
-      // Top/bottom faces
-      color = vec3<f32>(0.6, 0.8, 0.6); // Light green
-    } else if (abs(hit.normal.x) > 0.5) {
-      // Left/right faces
-      color = vec3<f32>(0.5, 0.7, 0.5); // Medium green
-    } else {
-      // Front/back faces
-      color = vec3<f32>(0.4, 0.6, 0.4); // Dark green
+    let material = getMaterial(hit.block_id);
+    let baseColor = vec3<f32>(material.colorR, material.colorG, material.colorB);
+    
+    // Simple directional lighting based on face normal
+    let sunDir = normalize(vec3<f32>(0.5, 1.0, 0.3));
+    let diffuse = max(dot(hit.normal, sunDir), 0.0);
+    let ambient = 0.4;
+    let lighting = ambient + diffuse * 0.6;
+    
+    color = baseColor * lighting;
+    
+    // Water transparency (basic for now)
+    if (material.transparent > 0.5) {
+      let skyColor = vec3<f32>(0.5, 0.7, 1.0);
+      color = mix(color, skyColor, 0.3); // 30% transparent
     }
   }
   
