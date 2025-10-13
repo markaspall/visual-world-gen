@@ -12,12 +12,17 @@ class SVDAGBuilder {
     this.nodeMap = new Map();
   }
 
-  build(voxelGrid) {
-    console.log('Building SVDAG from voxel grid...');
+  build(voxelGrid, materials = null, buildOpaqueDag = false) {
+    const dagType = buildOpaqueDag ? 'Opaque DAG' : 'Material DAG';
+    console.log(`Building ${dagType} from voxel grid...`);
     console.log('Grid size:', this.size, 'Depth:', this.maxDepth, 'Total voxels:', voxelGrid.length);
     const startTime = performance.now();
     
-    console.log('⏱️ Phase 1: Building octree...');
+    // Store materials for filtering in opaque DAG
+    this.materials = materials;
+    this.buildOpaqueDag = buildOpaqueDag;
+    
+    console.log(`⏱️ Phase 1: Building octree (${dagType})...`);
     const octreeStart = performance.now();
     const root = this.buildNode(voxelGrid, 0, 0, 0, this.size, 0);
     const octreeTime = ((performance.now() - octreeStart) / 1000).toFixed(2);
@@ -44,7 +49,7 @@ class SVDAGBuilder {
       dedupSavings: this.nodeMap.size
     };
     
-    console.log('✅ SVDAG built successfully!');
+    console.log(`✅ ${dagType} built successfully!`);
     console.log(`   Total time: ${totalTimeS}s (Octree: ${octreeTime}s, Flatten: ${flattenTime}s)`);
     console.log(`   Nodes: ${stats.totalNodes}, Leaves: ${stats.totalLeaves}`);
     console.log(`   Compression: ${stats.compressionRatio} (DAG saved ${stats.dedupSavings} duplicate nodes)`);
@@ -70,6 +75,14 @@ class SVDAGBuilder {
       // Return null for air (blockId=0) - air nodes are pruned
       if (blockId === 0) {
         return null;
+      }
+      
+      // For Opaque DAG: treat transparent materials as empty (like air)
+      if (this.buildOpaqueDag && this.materials && blockId < this.materials.length) {
+        const material = this.materials[blockId];
+        if (material && material.transparent > 0.0) {
+          return null;  // Transparent = empty in Opaque DAG
+        }
       }
       
       return { isLeaf: true, blockId };
@@ -224,7 +237,7 @@ export class SvdagRenderer {
     
     // Frame caching / dirty flags
     this.frameDirty = true;  // Always render first frame
-    this.pauseTime = false;  // FREEZE TIME - set to false to enable day/night cycle
+    this.pauseTime = true;  // FREEZE TIME - set to false to enable day/night cycle
     this.lastCameraState = null;
     this.lastTimeState = null;
     this.framesSaved = 0;
@@ -320,6 +333,17 @@ export class SvdagRenderer {
   async buildSVDAG(worldData) {
     console.log('Building SVDAG from world data...');
     
+    // Define materials (needed for building Opaque DAG)
+    this.blockMaterials = [
+      { id: 0, color: [0, 0, 0], transparent: 0, emissive: 0, reflective: 0 }, // Air
+      { id: 1, color: [0.27, 0.71, 0.27], transparent: 0, emissive: 0, reflective: 0 }, // Grass (green)
+      { id: 2, color: [0.55, 0.35, 0.24], transparent: 0, emissive: 0, reflective: 0 }, // Dirt (brown)
+      { id: 3, color: [0.5, 0.5, 0.5], transparent: 0, emissive: 0, reflective: 0 }, // Stone (gray)
+      { id: 4, color: [0.93, 0.79, 0.69], transparent: 0, emissive: 0, reflective: 0 }, // Sand (tan)
+      { id: 5, color: [1.0, 1.0, 1.0], transparent: 0, emissive: 0, reflective: 0.3 }, // Snow (white, reflective)
+      { id: 6, color: [0.12, 0.56, 1.0], transparent: 0.5, emissive: 0, reflective: 0.2 }, // Water (blue, transparent)
+    ];
+    
     // Load PNG data
     const files = worldData.files;
     
@@ -402,14 +426,19 @@ export class SvdagRenderer {
       `(255,255)=${Math.floor(heightData[255 * 2 * sourceSize + 255 * 2] * 256)}`
     );
     
-    // Build SVDAG with depth 8 (2^8 = 256)
-    const builder = new SVDAGBuilder(gridSize, 8);
-    console.log('✅ Building 256×256×256 SVDAG (should take 5-10 seconds)...');
+    // Build Material DAG with depth 8 (2^8 = 256)
+    console.log('✅ Building Material DAG (all materials)...');
+    const materialBuilder = new SVDAGBuilder(gridSize, 8);
+    this.svdag = materialBuilder.build(voxelGrid, this.blockMaterials, false);
     
-    // Use requestIdleCallback or setTimeout to yield periodically during build
-    this.svdag = builder.build(voxelGrid);
+    // Build Opaque DAG (transparent materials treated as empty)
+    console.log('✅ Building Opaque DAG (transparent = empty)...');
+    const opaqueBuilder = new SVDAGBuilder(gridSize, 8);
+    this.svdagOpaque = opaqueBuilder.build(voxelGrid, this.blockMaterials, true);
     
-    console.log('SVDAG compression:', this.svdag.stats.compressionRatio);
+    console.log('Material DAG compression:', this.svdag.stats.compressionRatio);
+    console.log('Opaque DAG compression:', this.svdagOpaque.stats.compressionRatio);
+    console.log('Total DAG size: Material=' + this.svdag.stats.totalNodes + ' nodes, Opaque=' + this.svdagOpaque.stats.totalNodes + ' nodes');
   }
 
   fillTestPattern(voxelGrid, gridSize, gridHeight, pattern) {
@@ -543,12 +572,14 @@ export class SvdagRenderer {
     const worldSize = gridSize * voxelSize; // ~170 meters total (same physical world)
     
     const svdagParamsData = new Float32Array([
-      this.svdag.rootIdx,
-      8,  // max_depth for 256^3 (2^8 = 256)
-      voxelSize,  // leaf_size (0.66m per voxel)
-      this.svdag.nodesBuffer.length,
-      worldSize,  // world_size (~170m)
-      0, 0, 0
+      this.svdag.rootIdx,                    // root_index (Material DAG)
+      8,                                      // max_depth for 256^3 (2^8 = 256)
+      voxelSize,                              // leaf_size (0.66m per voxel)
+      this.svdag.nodesBuffer.length,         // node_count (Material DAG)
+      worldSize,                              // world_size (in meters)
+      this.svdagOpaque.rootIdx,              // opaque_root_index
+      this.svdagOpaque.nodesBuffer.length,   // opaque_node_count
+      0                                       // _pad (alignment)
     ]);
     
     const nodeCount = this.svdag.nodesBuffer.length;
@@ -556,12 +587,13 @@ export class SvdagRenderer {
     const percentUsed = (nodeCount / u16Limit * 100).toFixed(1);
     
     console.log('SVDAG Params:', {
-      rootIdx: this.svdag.rootIdx,
+      materialRootIdx: this.svdag.rootIdx,
+      opaqueRootIdx: this.svdagOpaque.rootIdx,
       maxDepth: 8,
       leafSize: voxelSize,
-      nodeCount: nodeCount,
-      worldSize: worldSize,
-      u16Status: `${nodeCount} / ${u16Limit} (${percentUsed}% used)`
+      materialNodeCount: nodeCount,
+      opaqueNodeCount: this.svdagOpaque.nodesBuffer.length,
+      worldSize: worldSize
     });
     
     // Warn if approaching u16 limit
@@ -578,7 +610,7 @@ export class SvdagRenderer {
     new Float32Array(this.svdagParamsBuffer.getMappedRange()).set(svdagParamsData);
     this.svdagParamsBuffer.unmap();
     
-    // SVDAG nodes buffer
+    // Material DAG nodes buffer
     this.svdagNodesBuffer = this.device.createBuffer({
       size: this.svdag.nodesBuffer.byteLength,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
@@ -587,7 +619,7 @@ export class SvdagRenderer {
     new Uint32Array(this.svdagNodesBuffer.getMappedRange()).set(this.svdag.nodesBuffer);
     this.svdagNodesBuffer.unmap();
     
-    // SVDAG leaves buffer
+    // Material DAG leaves buffer (shared between both DAGs)
     console.log('Leaves buffer sample (first 20):', this.svdag.leavesBuffer.slice(0, 20));
     console.log('Leaves buffer non-zero count:', this.svdag.leavesBuffer.filter(x => x > 0).length);
     
@@ -599,18 +631,27 @@ export class SvdagRenderer {
     new Uint32Array(this.svdagLeavesBuffer.getMappedRange()).set(this.svdag.leavesBuffer);
     this.svdagLeavesBuffer.unmap();
     
-    // Materials buffer - matches BlockMaterial struct in shader
-    const materials = [
-      { id: 0, color: [0, 0, 0], transparent: 0, emissive: 0, reflective: 0 }, // Air
-      { id: 1, color: [0.27, 0.71, 0.27], transparent: 0, emissive: 0, reflective: 0 }, // Grass (green)
-      { id: 2, color: [0.55, 0.35, 0.24], transparent: 0, emissive: 0, reflective: 0 }, // Dirt (brown)
-      { id: 3, color: [0.5, 0.5, 0.5], transparent: 0, emissive: 0, reflective: 0 }, // Stone (gray)
-      { id: 4, color: [0.93, 0.79, 0.69], transparent: 0, emissive: 0, reflective: 0 }, // Sand (tan)
-      { id: 5, color: [1.0, 1.0, 1.0], transparent: 0, emissive: 0, reflective: 0.3 }, // Snow (white, reflective)
-      { id: 6, color: [0.12, 0.56, 1.0], transparent: 0.8, emissive: 0, reflective: 0.2 }, // Water (blue, transparent)
-    ];
+    // Opaque DAG nodes buffer
+    this.svdagOpaqueNodesBuffer = this.device.createBuffer({
+      size: this.svdagOpaque.nodesBuffer.byteLength,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      mappedAtCreation: true
+    });
+    new Uint32Array(this.svdagOpaqueNodesBuffer.getMappedRange()).set(this.svdagOpaque.nodesBuffer);
+    this.svdagOpaqueNodesBuffer.unmap();
     
-    // BlockMaterial struct: colorR, colorG, colorB, transparent, emissive, reflective, _pad1, _pad2 (8 floats = 32 bytes)
+    // Opaque DAG leaves buffer
+    this.svdagOpaqueLeavesBuffer = this.device.createBuffer({
+      size: this.svdagOpaque.leavesBuffer.byteLength,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      mappedAtCreation: true
+    });
+    new Uint32Array(this.svdagOpaqueLeavesBuffer.getMappedRange()).set(this.svdagOpaque.leavesBuffer);
+    this.svdagOpaqueLeavesBuffer.unmap();
+    
+    // Materials buffer - use materials defined in buildSVDAG
+    const materials = this.blockMaterials;
+    
     const materialsData = new Float32Array(materials.length * 8);
     materials.forEach((mat, i) => {
       const offset = i * 8;
@@ -660,7 +701,9 @@ export class SvdagRenderer {
         { binding: 2, resource: { buffer: this.svdagNodesBuffer } },
         { binding: 3, resource: { buffer: this.svdagLeavesBuffer } },
         { binding: 4, resource: this.outputTexture.createView() },
-        { binding: 5, resource: { buffer: this.materialsBuffer } }
+        { binding: 5, resource: { buffer: this.materialsBuffer } },
+        { binding: 6, resource: { buffer: this.svdagOpaqueNodesBuffer } },
+        { binding: 7, resource: { buffer: this.svdagOpaqueLeavesBuffer } }
       ]
     });
   }
