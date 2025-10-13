@@ -187,6 +187,13 @@ export class SvdagRenderer {
     this.sortChildren = false; // Sort children by distance
     this.earlyExit = false; // Exit on first hit (old behavior)
     
+    // Frame caching / dirty flags
+    this.frameDirty = true;  // Always render first frame
+    this.pauseTime = false;  // Set to true to freeze time (day/night cycle)
+    this.lastCameraState = null;
+    this.lastTimeState = null;
+    this.framesSaved = 0;
+    
     this.perfFlags = {
       enableShadows: true,
       enableReflections: true,
@@ -482,13 +489,24 @@ export class SvdagRenderer {
       0, 0, 0
     ]);
     
+    const nodeCount = this.svdag.nodesBuffer.length;
+    const u16Limit = 65536;
+    const percentUsed = (nodeCount / u16Limit * 100).toFixed(1);
+    
     console.log('SVDAG Params:', {
       rootIdx: this.svdag.rootIdx,
       maxDepth: 8,
       leafSize: voxelSize,
-      nodeCount: this.svdag.nodesBuffer.length,
-      worldSize: worldSize
+      nodeCount: nodeCount,
+      worldSize: worldSize,
+      u16Status: `${nodeCount} / ${u16Limit} (${percentUsed}% used)`
     });
+    
+    // Warn if approaching u16 limit
+    if (nodeCount > 60000) {
+      console.warn(`⚠️ Node count (${nodeCount}) approaching u16 limit (${u16Limit})!`);
+      console.warn('Consider switching to u32 node_idx in shader if you need larger worlds.');
+    }
     
     this.svdagParamsBuffer = this.device.createBuffer({
       size: svdagParamsData.byteLength,
@@ -650,6 +668,18 @@ export class SvdagRenderer {
     const yaw = this.camera.rotation[0];
     const pitch = this.camera.rotation[1];
     
+    // Check if camera changed
+    const currentState = JSON.stringify({
+      pos: this.camera.position,
+      rot: this.camera.rotation,
+      fov: this.camera.fov
+    });
+    
+    if (currentState !== this.lastCameraState) {
+      this.frameDirty = true;
+      this.lastCameraState = currentState;
+    }
+    
     const forward = [
       Math.sin(yaw) * Math.cos(pitch),
       Math.sin(pitch),
@@ -697,7 +727,14 @@ export class SvdagRenderer {
   }
 
   updateTime() {
-    this.time += 0.016;
+    if (!this.pauseTime) {
+      this.time += 0.016;
+      
+      // Only mark dirty if time-dependent effects are enabled
+      // Currently: shader doesn't use time for anything visual!
+      // When you add day/night lighting or water animation, uncomment:
+      // this.frameDirty = true;
+    }
     
     // Convert elapsed time to time of day (0-1 cycle)
     // Full day/night cycle every 60 seconds
@@ -716,6 +753,18 @@ export class SvdagRenderer {
   render() {
     this.updateCamera();
     this.updateTime();
+    
+    // Skip rendering if nothing changed (frame caching)
+    if (!this.frameDirty) {
+      this.framesSaved++;
+      if (this.framesSaved % 60 === 0) {
+        console.log(`Frame caching: Saved ${this.framesSaved} frames`);
+      }
+      return;
+    }
+    
+    // Reset dirty flag
+    this.frameDirty = false;
     
     const commandEncoder = this.device.createCommandEncoder();
     
@@ -745,6 +794,11 @@ export class SvdagRenderer {
     
     this.device.queue.submit([commandEncoder.finish()]);
   }
+  
+  // Manual dirty flag setter (for lighting changes, etc.)
+  markDirty() {
+    this.frameDirty = true;
+  }
 
   resize() {
     this.outputTexture.destroy();
@@ -755,6 +809,7 @@ export class SvdagRenderer {
     });
     
     this.createBindGroup();
+    this.markDirty();  // Need to rerender after resize
     
     this.renderBindGroup = this.device.createBindGroup({
       layout: this.renderPipeline.getBindGroupLayout(0),

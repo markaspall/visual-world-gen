@@ -55,8 +55,8 @@ fn unpackDepth(packed: u32) -> u32 {
 @group(0) @binding(3) var<storage, read> svdag_leaves: array<u32>;
 @group(0) @binding(4) var outputTexture: texture_storage_2d<rgba8unorm, write>;
 
-const MAX_STACK_DEPTH = 17;  // 16 bytes per entry = 416 bytes (was 400 bytes at depth 20)
-const MAX_STEPS = 256;
+const MAX_STACK_DEPTH = 17;  // 16 bytes per entry = 272 bytes
+const MAX_STEPS = 128;  // Reduced from 256 - most rays hit in <50 steps
 
 // ============================================================================
 // AABB Intersection
@@ -97,13 +97,13 @@ fn getOctant(pos: vec3<f32>, parent_center: vec3<f32>) -> u32 {
 
 fn getChildCenter(parent_center: vec3<f32>, child_size: f32, octant: u32) -> vec3<f32> {
   let offset = child_size * 0.5;
-  var center = parent_center;
   
-  if ((octant & 1u) != 0u) { center.x += offset; } else { center.x -= offset; }
-  if ((octant & 2u) != 0u) { center.y += offset; } else { center.y -= offset; }
-  if ((octant & 4u) != 0u) { center.z += offset; } else { center.z -= offset; }
+  // Branchless: use select() for GPU efficiency
+  let x = parent_center.x + select(-offset, offset, (octant & 1u) != 0u);
+  let y = parent_center.y + select(-offset, offset, (octant & 2u) != 0u);
+  let z = parent_center.z + select(-offset, offset, (octant & 4u) != 0u);
   
-  return center;
+  return vec3<f32>(x, y, z);
 }
 
 fn readNodeTag(node_idx: u32) -> u32 {
@@ -117,12 +117,9 @@ fn readChildMask(node_idx: u32) -> u32 {
 }
 
 fn readChildIndex(node_idx: u32, octant: u32, child_mask: u32) -> u32 {
-  var offset = 0u;
-  for (var i = 0u; i < octant; i++) {
-    if ((child_mask & (1u << i)) != 0u) {
-      offset += 1u;
-    }
-  }
+  // Count set bits before this octant using bitwise magic (faster than loop)
+  let mask_before = child_mask & ((1u << octant) - 1u);
+  let offset = countOneBits(mask_before);
   
   if (node_idx + 2u + offset >= arrayLength(&svdag_nodes)) { return 0u; }
   return svdag_nodes[node_idx + 2u + offset];
@@ -241,6 +238,7 @@ fn raymarchSVDAG(ray_origin: vec3<f32>, ray_dir: vec3<f32>) -> Hit {
       }
       
       let child_size = node_size * 0.5;
+      let child_half = child_size * 0.5;  // Pre-compute once for all children
       
       let ray_sign_x = u32(ray_dir.x >= 0.0);
       let ray_sign_y = u32(ray_dir.y >= 0.0);
@@ -260,7 +258,6 @@ fn raymarchSVDAG(ray_origin: vec3<f32>, ray_dir: vec3<f32>) -> Hit {
         }
         
         let child_center = getChildCenter(node_center, child_size, octant);
-        let child_half = child_size * 0.5;
         let child_min = child_center - vec3<f32>(child_half);
         let child_max = child_center + vec3<f32>(child_half);
         
