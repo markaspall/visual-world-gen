@@ -39,6 +39,7 @@ struct Hit {
   normal: vec3<f32>,
   block_id: u32,
   distance: f32,
+  transparent_distance: f32,  // Distance where we first hit transparent block (0 if none)
 }
 
 struct StackEntry {
@@ -67,8 +68,14 @@ fn unpackDepth(packed: u32) -> u32 {
 @group(0) @binding(4) var outputTexture: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(5) var<storage, read> materials: array<BlockMaterial>;
 
-const MAX_STACK_DEPTH = 17;  // 16 bytes per entry = 272 bytes
+const MAX_STACK_DEPTH = 19;  // 16 bytes per entry = 304 bytes (increased for water transparency)
 const MAX_STEPS = 128;  // Reduced from 256 - most rays hit in <50 steps
+
+// ============================================================================
+// PERFORMANCE TOGGLES - Change these to test what impacts FPS
+// ============================================================================
+const ENABLE_WATER_TRANSPARENCY = true;  // false = water is OPAQUE (faster)
+const ENABLE_TERRAIN_REFLECTIONS = false; // false = sky reflections only (much faster)
 
 // ============================================================================
 // Material System
@@ -87,6 +94,41 @@ fn getMaterial(block_id: u32) -> BlockMaterial {
     return mat;
   }
   return materials[block_id];
+}
+
+// ============================================================================
+// Lighting & Atmosphere
+// ============================================================================
+
+const PI = 3.14159265359;
+
+fn getSunDirection() -> vec3<f32> {
+  // Simple fixed sun direction for now
+  return normalize(vec3<f32>(0.5, 1.0, 0.3));
+}
+
+fn getSkyColor(rayDir: vec3<f32>, sunDir: vec3<f32>) -> vec3<f32> {
+  let sunDot = max(dot(rayDir, sunDir), 0.0);
+  let horizonDot = abs(rayDir.y);
+  
+  // Sky gradient
+  let skyColor = mix(
+    vec3<f32>(0.5, 0.7, 1.0),  // Horizon (lighter blue)
+    vec3<f32>(0.1, 0.3, 0.8),  // Zenith (darker blue)
+    pow(horizonDot, 0.5)
+  );
+  
+  // Sun glow
+  let sunGlow = pow(sunDot, 32.0) * 0.5;
+  
+  return skyColor + vec3<f32>(sunGlow);
+}
+
+fn fresnelSchlick(cosTheta: f32, n1: f32, n2: f32) -> f32 {
+  var r0 = (n1 - n2) / (n1 + n2);
+  r0 = r0 * r0;
+  let oneMinusCos = 1.0 - cosTheta;
+  return r0 + (1.0 - r0) * pow(oneMinusCos, 5.0);
 }
 
 // ============================================================================
@@ -165,6 +207,7 @@ fn raymarchSVDAG(ray_origin: vec3<f32>, ray_dir: vec3<f32>) -> Hit {
   hit.block_id = 0u;
   hit.distance = 1e30;
   hit.normal = vec3<f32>(0.0, 1.0, 0.0);
+  hit.transparent_distance = 0.0;  // Track first transparent block
   
   // Prevent division by zero when ray is parallel to axis
   let eps = 1e-8;
@@ -227,16 +270,33 @@ fn raymarchSVDAG(ray_origin: vec3<f32>, ray_dir: vec3<f32>) -> Hit {
       }
       let leaf_idx = svdag_nodes[node_idx + 1u];
       
+      var block_id = 0u;
       if (leaf_idx < arrayLength(&svdag_leaves)) {
-        hit.block_id = svdag_leaves[leaf_idx];
+        block_id = svdag_leaves[leaf_idx];
       } else {
-        hit.block_id = 1u;
+        block_id = 1u;
       }
       
-      if (hit.block_id == 0u) {
-        hit.block_id = 1u;
+      if (block_id == 0u) {
+        block_id = 1u;
       }
       
+      // Check if this block is transparent - if transparency enabled, SKIP it and continue
+      if (ENABLE_WATER_TRANSPARENCY && block_id > 0u && block_id < arrayLength(&materials)) {
+        let mat = materials[block_id];
+        if (mat.transparent > 0.5) {
+          // Transparent block - remember first transparent hit
+          if (hit.transparent_distance == 0.0) {
+            hit.transparent_distance = current_t;
+          }
+          // Skip it and keep searching for solid terrain
+          current_t += node_size * 0.5; // Move past this voxel
+          continue;
+        }
+      }
+      
+      // SOLID block found - return it
+      hit.block_id = block_id;
       hit.distance = current_t;
       
       // Calculate normal from AABB entry face
@@ -336,28 +396,73 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     camera.up * ndc.y * tan(camera.fov * 0.5)
   );
   
-  // Raymarch
+  // Raymarch - now automatically skips transparent blocks
   let hit = raymarchSVDAG(camera.position, rayDir);
   
-  // Color based on material + lighting
-  var color = vec3<f32>(0.5, 0.7, 1.0); // Sky blue
+  // Get sun direction
+  let sunDir = getSunDirection();
+  
+  // Default to sky color
+  var color = getSkyColor(rayDir, sunDir);
   
   if (hit.block_id > 0u) {
     let material = getMaterial(hit.block_id);
     let baseColor = vec3<f32>(material.colorR, material.colorG, material.colorB);
     
-    // Simple directional lighting based on face normal
-    let sunDir = normalize(vec3<f32>(0.5, 1.0, 0.3));
+    // Directional lighting
     let diffuse = max(dot(hit.normal, sunDir), 0.0);
     let ambient = 0.4;
     let lighting = ambient + diffuse * 0.6;
     
-    color = baseColor * lighting;
+    var finalColor = baseColor * lighting;
     
-    // Water transparency (basic for now)
-    if (material.transparent > 0.5) {
-      let skyColor = vec3<f32>(0.5, 0.7, 1.0);
-      color = mix(color, skyColor, 0.3); // 30% transparent
+    // If we passed through transparent blocks (water), apply water effects
+    if (ENABLE_WATER_TRANSPARENCY && hit.transparent_distance > 0.0) {
+      // WATER RENDERING - smooth surface with terrain beneath
+      
+      // Calculate Fresnel effect (determines reflection vs transmission)
+      let waterNormal = vec3<f32>(0.0, 1.0, 0.0);
+      let viewDir = -rayDir;
+      let cosTheta = abs(dot(viewDir, waterNormal));
+      let fresnel = fresnelSchlick(cosTheta, 1.0, 1.33); // Air to water IOR
+      
+      // REFRACTION PATH (what you see THROUGH the water)
+      // Apply blue water tint to terrain beneath
+      let waterColor = vec3<f32>(0.12, 0.56, 1.0);
+      let waterDepth = hit.distance - hit.transparent_distance;
+      let depthFactor = waterDepth * 0.05; // Attenuation based on depth
+      let waterTint = clamp(depthFactor, 0.1, 0.6); // 10-60% tint
+      let refractionColor = mix(finalColor, waterColor, waterTint);
+      
+      // REFLECTION PATH (what bounces off water surface)
+      let reflectDir = reflect(rayDir, waterNormal);
+      
+      var reflectionColor = getSkyColor(reflectDir, sunDir); // Sky reflection (always)
+      
+      if (ENABLE_TERRAIN_REFLECTIONS) {
+        // Sparse sampling: Only trace on 1-in-9 pixels (3x3 grid = 89% cost reduction!)
+        let shouldTraceReflection = ((pixelCoord.x % 3u) == 0u) && ((pixelCoord.y % 3u) == 0u);
+        
+        if (shouldTraceReflection && fresnel > 0.4) { // Only trace if reflection is significant
+          let waterSurfacePos = camera.position + rayDir * hit.transparent_distance;
+          let reflectionHit = raymarchSVDAG(waterSurfacePos + reflectDir * 0.1, reflectDir);
+          
+          if (reflectionHit.block_id > 0u) {
+            let reflectMat = getMaterial(reflectionHit.block_id);
+            let reflectBase = vec3<f32>(reflectMat.colorR, reflectMat.colorG, reflectMat.colorB);
+            let reflectDiffuse = max(dot(reflectionHit.normal, sunDir), 0.0);
+            let reflectLighting = ambient + reflectDiffuse * 0.6;
+            // Mix terrain reflection with sky (helps blend sparse samples)
+            reflectionColor = mix(reflectionColor, reflectBase * reflectLighting, 0.7);
+          }
+        }
+      }
+      
+      // Fresnel determines: STEEP angle (looking down) = refraction, GRAZING angle = reflection
+      color = mix(refractionColor, reflectionColor, fresnel);
+    } else {
+      // Solid terrain (or water transparency disabled)
+      color = finalColor;
     }
   }
   

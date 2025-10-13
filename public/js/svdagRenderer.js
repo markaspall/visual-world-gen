@@ -217,9 +217,14 @@ export class SvdagRenderer {
     this.sortChildren = false; // Sort children by distance
     this.earlyExit = false; // Exit on first hit (old behavior)
     
+    // Bloom settings
+    this.enableBloom = false;  // Toggle bloom effect - DISABLED for performance
+    this.bloomThreshold = 0.7;  // Brightness threshold for bloom (0-1)
+    this.bloomIntensity = 0.4;  // How strong the bloom is (0-1)
+    
     // Frame caching / dirty flags
     this.frameDirty = true;  // Always render first frame
-    this.pauseTime = false;  // Set to true to freeze time (day/night cycle)
+    this.pauseTime = false;  // FREEZE TIME - set to false to enable day/night cycle
     this.lastCameraState = null;
     this.lastTimeState = null;
     this.framesSaved = 0;
@@ -342,6 +347,7 @@ export class SvdagRenderer {
     console.log('⏳ Building full-resolution SVDAG... this may take 5-10 seconds');
     
     let filledVoxels = 0;
+    let waterVoxels = 0;
     let maxHeight = 0;
     
     // TEST PATTERN OVERRIDE
@@ -378,6 +384,7 @@ export class SvdagRenderer {
               const voxelIdx = z * gridSize * gridHeight + y * gridSize + x;
               voxelGrid[voxelIdx] = 6;  // Material ID 6 = Water
               filledVoxels++;
+              waterVoxels++;
             }
           }
         }
@@ -385,6 +392,8 @@ export class SvdagRenderer {
     }
     
     console.log(`Filled ${filledVoxels} voxels (${(filledVoxels / voxelGrid.length * 100).toFixed(1)}% of grid)`);
+    console.log(`  - Terrain: ${filledVoxels - waterVoxels} voxels`);
+    console.log(`  - Water: ${waterVoxels} voxels`);
     console.log(`Max terrain height: ${maxHeight} voxels`);
     console.log(`Sample heights at corners:`, 
       `(0,0)=${Math.floor(heightData[0] * 256)}`,
@@ -486,6 +495,16 @@ export class SvdagRenderer {
     // Create output texture
     this.outputTexture = this.device.createTexture({
       size: [this.canvas.width, this.canvas.height],
+      format: 'rgba8unorm',
+      usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING
+    });
+    
+    // Create bloom textures (quarter resolution for performance)
+    const bloomWidth = Math.max(1, Math.floor(this.canvas.width / 2));
+    const bloomHeight = Math.max(1, Math.floor(this.canvas.height / 2));
+    
+    this.bloomTexture = this.device.createTexture({
+      size: [bloomWidth, bloomHeight],
       format: 'rgba8unorm',
       usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING
     });
@@ -664,11 +683,19 @@ export class SvdagRenderer {
 
         @group(0) @binding(0) var outputTexture: texture_2d<f32>;
         @group(0) @binding(1) var textureSampler: sampler;
+        @group(0) @binding(2) var bloomTexture: texture_2d<f32>;
 
         @fragment
         fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
           let texCoord = pos.xy / vec2<f32>(textureDimensions(outputTexture));
-          return textureSample(outputTexture, textureSampler, texCoord);
+          var color = textureSample(outputTexture, textureSampler, texCoord).rgb;
+          
+          // Add bloom (if enabled, controlled by alpha channel or separate uniform)
+          let bloom = textureSample(bloomTexture, textureSampler, texCoord).rgb;
+          let bloomIntensity = 0.6; // Increased to make bloom more visible
+          color += bloom * bloomIntensity;
+          
+          return vec4<f32>(color, 1.0);
         }
       `
     });
@@ -700,7 +727,61 @@ export class SvdagRenderer {
       layout: this.renderPipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: this.outputTexture.createView() },
-        { binding: 1, resource: this.sampler }
+        { binding: 1, resource: this.sampler },
+        { binding: 2, resource: this.bloomTexture.createView() }
+      ]
+    });
+    
+    // Bloom pipeline - extracts bright pixels and blurs
+    const bloomShaderModule = this.device.createShaderModule({
+      code: `
+        @group(0) @binding(0) var inputTexture: texture_2d<f32>;
+        @group(0) @binding(1) var outputTexture: texture_storage_2d<rgba8unorm, write>;
+        
+        @compute @workgroup_size(16, 16)
+        fn main(@builtin(global_invocation_id) globalId: vec3<u32>) {
+          let dims = textureDimensions(inputTexture);
+          let coord = vec2<i32>(i32(globalId.x * 2u), i32(globalId.y * 2u)); // Half resolution
+          
+          if (coord.x >= i32(dims.x) || coord.y >= i32(dims.y)) {
+            return;
+          }
+          
+          // Sample and downsample with 2x2 box filter
+          var color = vec3<f32>(0.0);
+          for (var y = 0; y < 2; y++) {
+            for (var x = 0; x < 2; x++) {
+              let sampleCoord = coord + vec2<i32>(x, y);
+              if (sampleCoord.x < i32(dims.x) && sampleCoord.y < i32(dims.y)) {
+                color += textureLoad(inputTexture, sampleCoord, 0).rgb;
+              }
+            }
+          }
+          color /= 4.0;
+          
+          // Extract bright pixels (threshold) - lowered to catch water highlights
+          let brightness = max(max(color.r, color.g), color.b);
+          let threshold = 0.5;  // Lower threshold = more bloom
+          let bloomColor = max(vec3<f32>(0.0), color * smoothstep(threshold, threshold + 0.3, brightness));
+          
+          textureStore(outputTexture, vec2<i32>(globalId.xy), vec4<f32>(bloomColor, 1.0));
+        }
+      `
+    });
+    
+    this.bloomPipeline = this.device.createComputePipeline({
+      layout: 'auto',
+      compute: {
+        module: bloomShaderModule,
+        entryPoint: 'main'
+      }
+    });
+    
+    this.bloomBindGroup = this.device.createBindGroup({
+      layout: this.bloomPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: this.outputTexture.createView() },
+        { binding: 1, resource: this.bloomTexture.createView() }
       ]
     });
   }
@@ -771,10 +852,8 @@ export class SvdagRenderer {
     if (!this.pauseTime) {
       this.time += 0.016;
       
-      // Only mark dirty if time-dependent effects are enabled
-      // Currently: shader doesn't use time for anything visual!
-      // When you add day/night lighting or water animation, uncomment:
-      // this.frameDirty = true;
+      // Mark frame dirty so it re-renders with new time
+      this.frameDirty = true;
     }
     
     // Convert elapsed time to time of day (0-1 cycle)
@@ -809,7 +888,7 @@ export class SvdagRenderer {
     
     const commandEncoder = this.device.createCommandEncoder();
     
-    // Compute pass
+    // Compute pass - main raymarching
     const computePass = commandEncoder.beginComputePass();
     computePass.setPipeline(this.computePipeline);
     computePass.setBindGroup(0, this.computeBindGroup);
@@ -818,6 +897,20 @@ export class SvdagRenderer {
       Math.ceil(this.canvas.height / 16)
     );
     computePass.end();
+    
+    // Bloom pass - extract and blur bright pixels
+    if (this.enableBloom) {
+      const bloomPass = commandEncoder.beginComputePass();
+      bloomPass.setPipeline(this.bloomPipeline);
+      bloomPass.setBindGroup(0, this.bloomBindGroup);
+      const bloomWidth = Math.max(1, Math.floor(this.canvas.width / 2));
+      const bloomHeight = Math.max(1, Math.floor(this.canvas.height / 2));
+      bloomPass.dispatchWorkgroups(
+        Math.ceil(bloomWidth / 16),
+        Math.ceil(bloomHeight / 16)
+      );
+      bloomPass.end();
+    }
     
     // Render pass
     const renderPass = commandEncoder.beginRenderPass({
@@ -849,6 +942,16 @@ export class SvdagRenderer {
       usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING
     });
     
+    // Recreate bloom texture
+    this.bloomTexture.destroy();
+    const bloomWidth = Math.max(1, Math.floor(this.canvas.width / 2));
+    const bloomHeight = Math.max(1, Math.floor(this.canvas.height / 2));
+    this.bloomTexture = this.device.createTexture({
+      size: [bloomWidth, bloomHeight],
+      format: 'rgba8unorm',
+      usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING
+    });
+    
     this.createBindGroup();
     this.markDirty();  // Need to rerender after resize
     
@@ -856,7 +959,16 @@ export class SvdagRenderer {
       layout: this.renderPipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: this.outputTexture.createView() },
-        { binding: 1, resource: this.sampler }
+        { binding: 1, resource: this.sampler },
+        { binding: 2, resource: this.bloomTexture.createView() }
+      ]
+    });
+    
+    this.bloomBindGroup = this.device.createBindGroup({
+      layout: this.bloomPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: this.outputTexture.createView() },
+        { binding: 1, resource: this.bloomTexture.createView() }
       ]
     });
   }
