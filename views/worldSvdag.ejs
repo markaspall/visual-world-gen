@@ -253,7 +253,7 @@
     <h4>🐛 Debug Modes</h4>
     <label>
       <input type="checkbox" id="debug-flat-colors">
-      <span>🎨 Block ID Colors</span>
+      <span>🎨 Node Index Colors</span>
     </label>
     <label>
       <input type="checkbox" id="debug-dag-levels">
@@ -263,6 +263,44 @@
       <input type="checkbox" id="debug-step-count">
       <span>⚡ Step Count Heatmap</span>
     </label>
+    <hr style="border: none; border-top: 1px solid #333; margin: 10px 0;">
+    <h4>🧪 Test Patterns</h4>
+    <div style="margin: 10px 0;">
+      <select id="test-pattern" style="width: 100%; padding: 5px; background: #222; color: #0f0; border: 1px solid #0f0;">
+        <option value="">Real Terrain</option>
+        <option value="flat">Flat (y=50)</option>
+        <option value="steps">Steps (8 levels)</option>
+        <option value="slope">Smooth Slope</option>
+        <option value="checkerboard">Checkerboard</option>
+        <option value="pyramid">Pyramid</option>
+      </select>
+      <button id="apply-pattern" style="width: 100%; margin-top: 5px; padding: 5px; background: #0f0; color: #000; border: none; cursor: pointer; font-weight: bold;">
+        RELOAD WITH PATTERN
+      </button>
+    </div>
+    <hr style="border: none; border-top: 1px solid #333; margin: 10px 0;">
+    <h4>⚙️ Diagnostic Tests</h4>
+    <label>
+      <input type="checkbox" id="early-exit">
+      <span>❌ Disable Leaf Validation</span>
+    </label>
+    <label>
+      <input type="checkbox" id="reverse-stack">
+      <span>📏 Show Distance (blue=near, red=far)</span>
+    </label>
+    <label>
+      <input type="checkbox" id="reverse-children">
+      <span>🔃 [Unused]</span>
+    </label>
+    <div style="margin: 10px 0;">
+      <label style="display: block; margin-bottom: 5px;">
+        <span id="epsilon-label">Epsilon: 0.000</span>
+      </label>
+      <input type="range" id="epsilon-slider" min="0" max="100" value="0" style="width: 100%;">
+      <div style="font-size: 10px; color: #666; margin-top: 5px;">
+        Test different settings above to find the bug!
+      </div>
+    </div>
   </div>
   
   <script type="module">
@@ -301,10 +339,17 @@
       document.getElementById('position').textContent = `${pos[0].toFixed(1)}, ${pos[1].toFixed(1)}, ${pos[2].toFixed(1)}`;
       document.getElementById('direction').textContent = `${(rot[0] * 180 / Math.PI).toFixed(0)}°, ${(rot[1] * 180 / Math.PI).toFixed(0)}°`;
       
-      // Center ray info (crosshair visible on screen)
-      document.getElementById('centerHit').textContent = 'See crosshair';
-      document.getElementById('centerDepth').textContent = 'Color = depth';
-      document.getElementById('centerDist').textContent = 'Debug mode';
+      // Center ray info from GPU readback
+      if (window.centerPixelInfo) {
+        const info = window.centerPixelInfo;
+        document.getElementById('centerHit').textContent = `Block:${info.blockId} Node:${info.nodeIdx} Leaf:${info.leafIdx}`;
+        document.getElementById('centerDepth').textContent = `Depth:${info.depth} Steps:${info.steps}`;
+        document.getElementById('centerDist').textContent = `Dist:${info.distance.toFixed(1)} Normal:(${info.normal[0].toFixed(2)},${info.normal[1].toFixed(2)},${info.normal[2].toFixed(2)})`;
+      } else {
+        document.getElementById('centerHit').textContent = 'Reading...';
+        document.getElementById('centerDepth').textContent = 'Aim crosshair';
+        document.getElementById('centerDist').textContent = 'at terrain';
+      }
     }
     
     // Set canvas size with render scale (0.5 = half resolution for 4× faster rendering)
@@ -350,6 +395,14 @@
       
       console.log('World data loaded:', worldData);
       
+      // Check for test pattern in localStorage BEFORE initializing
+      // Disabled by default - only use if explicitly set
+      // const savedPattern = localStorage.getItem('svdagTestPattern');
+      // if (savedPattern) {
+      //   window.svdagTestPattern = savedPattern;
+      //   console.log('🧪 Applying test pattern from localStorage:', savedPattern);
+      // }
+      
       // Initialize SVDAG renderer
       const renderer = new SvdagRenderer(canvas);
       window.renderer = renderer;
@@ -390,6 +443,48 @@
           renderer.debugFlags.debugWaterValues = false;
           renderer.debugFlags.debugDAGLevels = false;
         }
+      });
+      
+      // Epsilon slider control
+      document.getElementById('epsilon-slider').addEventListener('input', (e) => {
+        const value = parseInt(e.target.value);
+        renderer.epsilonScale = value / 10.0; // Convert 0-100 slider to 0-10 scale
+        document.getElementById('epsilon-label').textContent = `Epsilon: ${renderer.epsilonScale.toFixed(3)}`;
+      });
+      
+      // Traversal controls
+      document.getElementById('early-exit').addEventListener('change', (e) => {
+        renderer.earlyExit = e.target.checked;
+        console.log('Early exit:', renderer.earlyExit);
+      });
+      
+      document.getElementById('reverse-stack').addEventListener('change', (e) => {
+        renderer.reverseStack = e.target.checked;
+        console.log('Reverse stack (FIFO):', renderer.reverseStack);
+      });
+      
+      document.getElementById('reverse-children').addEventListener('change', (e) => {
+        renderer.sortChildren = e.target.checked;
+        console.log('Reverse child insertion:', renderer.sortChildren);
+      });
+      
+      // Restore saved test pattern in dropdown
+      const currentPattern = localStorage.getItem('svdagTestPattern');
+      if (currentPattern) {
+        document.getElementById('test-pattern').value = currentPattern;
+      }
+      
+      // Test pattern reload
+      document.getElementById('apply-pattern').addEventListener('click', () => {
+        const pattern = document.getElementById('test-pattern').value;
+        if (pattern) {
+          localStorage.setItem('svdagTestPattern', pattern);
+          console.log('🧪 Reloading with pattern:', pattern);
+        } else {
+          localStorage.removeItem('svdagTestPattern');
+          console.log('🌍 Reloading with real terrain');
+        }
+        location.reload();
       });
       
       // Camera controls

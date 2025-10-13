@@ -178,13 +178,14 @@ export class SvdagRenderer {
       showTerrain: true,
       showWater: true,
       debugWaterValues: false,  // Repurposed for "flat colors" mode
-      debugStepCount: false,
-      debugDistance: false,
-      debugNormals: false,
       debugDAGLevels: false,
-      debugLeafSize: false,
-      debugPerformance: false
+      debugStepCount: false
     };
+    
+    this.epsilonScale = 0.0; // User-adjustable epsilon (0-10)
+    this.reverseStack = false; // FIFO vs LIFO
+    this.sortChildren = false; // Sort children by distance
+    this.earlyExit = false; // Exit on first hit (old behavior)
     
     this.perfFlags = {
       enableShadows: true,
@@ -306,24 +307,31 @@ export class SvdagRenderer {
     let filledVoxels = 0;
     let maxHeight = 0;
     
-    // Fill voxel grid - sample from 512x512 source to 256x256x256 grid
-    for (let x = 0; x < gridSize; x++) {
-      for (let z = 0; z < gridSize; z++) {
-        // Sample from source heightmap (every 2nd pixel)
-        const srcX = x * 2;
-        const srcZ = z * 2;
-        const idx = srcZ * sourceSize + srcX;
-        
-        const terrainHeight = Math.floor(heightData[idx] * 256);
-        const blockType = blocksData[idx] || 1;
-        
-        if (terrainHeight > maxHeight) maxHeight = terrainHeight;
-        
-        // Fill terrain
-        for (let y = 0; y <= terrainHeight && y < gridHeight; y++) {
-          const voxelIdx = z * gridSize * gridHeight + y * gridSize + x;
-          voxelGrid[voxelIdx] = blockType;
-          filledVoxels++;
+    // TEST PATTERN OVERRIDE
+    if (window.svdagTestPattern) {
+      console.log('🧪 Using test pattern:', window.svdagTestPattern);
+      this.fillTestPattern(voxelGrid, gridSize, gridHeight, window.svdagTestPattern);
+      filledVoxels = voxelGrid.filter(v => v > 0).length;
+    } else {
+      // Fill voxel grid - sample from 512x512 source to 256x256x256 grid
+      for (let x = 0; x < gridSize; x++) {
+        for (let z = 0; z < gridSize; z++) {
+          // Sample from source heightmap (every 2nd pixel)
+          const srcX = x * 2;
+          const srcZ = z * 2;
+          const idx = srcZ * sourceSize + srcX;
+          
+          const terrainHeight = Math.floor(heightData[idx] * 256);
+          const blockType = blocksData[idx] || 6;
+          
+          if (terrainHeight > maxHeight) maxHeight = terrainHeight;
+          
+          // Fill terrain
+          for (let y = 0; y <= terrainHeight && y < gridHeight; y++) {
+            const voxelIdx = z * gridSize * gridHeight + y * gridSize + x;
+            voxelGrid[voxelIdx] = blockType;
+            filledVoxels++;
+          }
         }
       }
     }
@@ -343,6 +351,75 @@ export class SvdagRenderer {
     this.svdag = builder.build(voxelGrid);
     
     console.log('SVDAG compression:', this.svdag.stats.compressionRatio);
+  }
+
+  fillTestPattern(voxelGrid, gridSize, gridHeight, pattern) {
+    const getIdx = (x, y, z) => z * gridSize * gridHeight + y * gridSize + x;
+    
+    switch(pattern) {
+      case 'flat':
+        // Flat ground at y=50
+        for (let x = 0; x < gridSize; x++) {
+          for (let z = 0; z < gridSize; z++) {
+            for (let y = 0; y <= 50; y++) {
+              voxelGrid[getIdx(x, y, z)] = 1;
+            }
+          }
+        }
+        break;
+        
+      case 'steps':
+        // Stepped terrain - 8 steps across the world
+        for (let x = 0; x < gridSize; x++) {
+          for (let z = 0; z < gridSize; z++) {
+            const height = Math.floor(x / 32) * 16 + 10; // Step every 32 voxels
+            for (let y = 0; y <= height && y < gridHeight; y++) {
+              voxelGrid[getIdx(x, y, z)] = 1;
+            }
+          }
+        }
+        break;
+        
+      case 'slope':
+        // Smooth slope from y=10 to y=100
+        for (let x = 0; x < gridSize; x++) {
+          for (let z = 0; z < gridSize; z++) {
+            const height = Math.floor(10 + (x / gridSize) * 90);
+            for (let y = 0; y <= height && y < gridHeight; y++) {
+              voxelGrid[getIdx(x, y, z)] = 1;
+            }
+          }
+        }
+        break;
+        
+      case 'checkerboard':
+        // Checkerboard pattern with different heights
+        for (let x = 0; x < gridSize; x++) {
+          for (let z = 0; z < gridSize; z++) {
+            const checker = ((Math.floor(x / 16) + Math.floor(z / 16)) % 2);
+            const height = checker ? 40 : 20;
+            for (let y = 0; y <= height; y++) {
+              voxelGrid[getIdx(x, y, z)] = 1;
+            }
+          }
+        }
+        break;
+        
+      case 'pyramid':
+        // Pyramid in center
+        const center = gridSize / 2;
+        for (let x = 0; x < gridSize; x++) {
+          for (let z = 0; z < gridSize; z++) {
+            const distFromCenter = Math.max(Math.abs(x - center), Math.abs(z - center));
+            const height = Math.max(0, 100 - distFromCenter);
+            for (let y = 0; y <= height && y < gridHeight; y++) {
+              voxelGrid[getIdx(x, y, z)] = 1;
+            }
+          }
+        }
+        break;
+    }
+    console.log(`✅ Test pattern '${pattern}' generated`);
   }
 
   async createPipeline() {
@@ -385,9 +462,9 @@ export class SvdagRenderer {
   }
 
   createBuffers() {
-    // Camera buffer (76 bytes, round up to 80 for alignment)
+    // Camera buffer (now 96 bytes = 24 floats)
     this.cameraBuffer = this.device.createBuffer({
-      size: 80,
+      size: 96,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
     });
     
@@ -432,6 +509,18 @@ export class SvdagRenderer {
     
     // SVDAG leaves buffer
     console.log('Leaves buffer sample (first 20):', this.svdag.leavesBuffer.slice(0, 20));
+    
+    // Center pixel data buffer (for readback)
+    this.centerPixelDataBuffer = this.device.createBuffer({
+      size: 36, // 9 u32 values = 36 bytes
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+    });
+    
+    // Staging buffer for reading back center pixel data
+    this.centerPixelStagingBuffer = this.device.createBuffer({
+      size: 36,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+    });
     console.log('Leaves buffer non-zero count:', this.svdag.leavesBuffer.filter(x => x > 0).length);
     
     this.svdagLeavesBuffer = this.device.createBuffer({
@@ -505,7 +594,8 @@ export class SvdagRenderer {
         { binding: 1, resource: { buffer: this.svdagParamsBuffer } },
         { binding: 2, resource: { buffer: this.svdagNodesBuffer } },
         { binding: 3, resource: { buffer: this.svdagLeavesBuffer } },
-        { binding: 4, resource: this.outputTexture.createView() }
+        { binding: 4, resource: this.outputTexture.createView() },
+        { binding: 5, resource: { buffer: this.centerPixelDataBuffer } }
       ]
     });
   }
@@ -601,7 +691,11 @@ export class SvdagRenderer {
       this.debugFlags.debugWaterValues ? 1.0 : 0.0,  // debug_block_id (repurposed)
       this.debugFlags.debugDAGLevels ? 1.0 : 0.0,     // debug_dag_level
       this.debugFlags.debugStepCount ? 1.0 : 0.0,     // debug_step_count
-      0.0  // _pad3
+      this.epsilonScale,  // epsilon_scale (user adjustable)
+      this.reverseStack ? 1.0 : 0.0,  // reverse_stack
+      this.sortChildren ? 1.0 : 0.0,  // sort_children
+      this.earlyExit ? 1.0 : 0.0,     // early_exit
+      0.0  // _pad4
     ]);
     
     this.device.queue.writeBuffer(this.cameraBuffer, 0, cameraData);
@@ -662,16 +756,57 @@ export class SvdagRenderer {
     renderPass.draw(6);
     renderPass.end();
     
+    // Only copy and read if not currently reading and enough time has passed
+    const shouldRead = !this.isReadingCenterPixel && 
+                       (!this.lastReadFrame || performance.now() - this.lastReadFrame > 100);
+    
+    if (shouldRead) {
+      // Copy center pixel data to staging buffer for readback
+      commandEncoder.copyBufferToBuffer(
+        this.centerPixelDataBuffer, 0,
+        this.centerPixelStagingBuffer, 0,
+        36
+      );
+    }
+    
     this.device.queue.submit([commandEncoder.finish()]);
     
-    // Log once on first render
-    if (!this._loggedRender) {
-      console.log('First render completed.');
-      console.log('Resolution:', this.canvas.width, 'x', this.canvas.height, '=', this.canvas.width * this.canvas.height, 'pixels');
-      console.log('Workgroups:', 
-        Math.ceil(this.canvas.width / 16), 'x', Math.ceil(this.canvas.height / 16), '=',
-        Math.ceil(this.canvas.width / 16) * Math.ceil(this.canvas.height / 16), 'groups');
-      this._loggedRender = true;
+    // DISABLED: Crosshair readback causing buffer errors
+    // if (shouldRead) {
+    //   this.device.queue.onSubmittedWorkDone().then(() => {
+    //     this.readCenterPixelData();
+    //   });
+    // }
+  }
+  
+  async readCenterPixelData() {
+    this.lastReadFrame = performance.now();
+    this.isReadingCenterPixel = true;
+    
+    try {
+      await this.centerPixelStagingBuffer.mapAsync(GPUMapMode.READ);
+      const data = new Uint32Array(this.centerPixelStagingBuffer.getMappedRange());
+      
+      // Store for display
+      window.centerPixelInfo = {
+        blockId: data[0],
+        nodeIdx: data[1],
+        leafIdx: data[2],
+        depth: data[3],
+        steps: data[4],
+        distance: data[5] / 100.0,
+        normal: [
+          (data[6] / 100.0) - 1.0,
+          (data[7] / 100.0) - 1.0,
+          (data[8] / 100.0) - 1.0
+        ]
+      };
+      
+      this.centerPixelStagingBuffer.unmap();
+    } catch (error) {
+      console.error('Failed to read center pixel data:', error);
+    } finally {
+      this.isReadingCenterPixel = false;
     }
   }
 
