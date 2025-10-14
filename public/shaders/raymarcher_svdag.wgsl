@@ -35,6 +35,13 @@ struct BlockMaterial {
   _pad2: f32,
 }
 
+struct TimeParams {
+  time: f32,
+  timeOfDay: f32,
+  fogStart: f32,      // Distance where fog starts
+  fogEnd: f32,        // Distance where fog is 100% (ray killed)
+}
+
 struct Hit {
   normal: vec3<f32>,
   block_id: u32,
@@ -69,6 +76,7 @@ fn unpackDepth(packed: u32) -> u32 {
 @group(0) @binding(5) var<storage, read> materials: array<BlockMaterial>;
 @group(0) @binding(6) var<storage, read> svdag_opaque_nodes: array<u32>;  // Opaque DAG
 @group(0) @binding(7) var<storage, read> svdag_opaque_leaves: array<u32>; // Opaque leaves
+@group(0) @binding(8) var<uniform> timeParams: TimeParams;
 
 const MAX_STACK_DEPTH = 19;  // 16 bytes per entry = 304 bytes (increased for water transparency)
 const MAX_STEPS = 128;  // Reduced from 256 - most rays hit in <50 steps
@@ -94,6 +102,112 @@ const ENABLE_WATER_TRANSPARENCY = true;  // false = water is OPAQUE (faster)
 const ENABLE_TERRAIN_REFLECTIONS = false; // false = sky reflections only (much faster)
 
 // ============================================================================
+// Day/Night Cycle & Sky
+// ============================================================================
+
+const PI = 3.14159265359;
+
+fn getSunDirection() -> vec3<f32> {
+  let angle = timeParams.timeOfDay * 2.0 * PI;
+  let elevation = sin(angle);
+  let azimuth = cos(angle);
+  return normalize(vec3<f32>(azimuth, elevation, 0.3));
+}
+
+fn getMoonDirection() -> vec3<f32> {
+  // Moon is roughly opposite the sun
+  let angle = timeParams.timeOfDay * 2.0 * PI + PI; // +PI = opposite side
+  let elevation = sin(angle);
+  let azimuth = cos(angle);
+  return normalize(vec3<f32>(azimuth, elevation, -0.3)); // Slightly different path
+}
+
+fn getSkyColor(rayDir: vec3<f32>, sunDir: vec3<f32>) -> vec3<f32> {
+  let sunDot = max(dot(rayDir, sunDir), 0.0);
+  let horizonDot = abs(rayDir.y);
+  let sunElevation = sunDir.y;
+  
+  // Day colors
+  let dayColor = vec3<f32>(0.4, 0.7, 1.0);
+  let dayHorizon = vec3<f32>(0.7, 0.85, 1.0);
+  let daySun = vec3<f32>(1.0, 0.95, 0.8);
+  
+  // Sunset colors
+  let sunsetColor = vec3<f32>(0.4, 0.3, 0.6);
+  let sunsetHorizon = vec3<f32>(1.0, 0.5, 0.3);
+  let sunsetSun = vec3<f32>(1.0, 0.4, 0.2);
+  
+  // Night colors
+  let nightColor = vec3<f32>(0.01, 0.01, 0.05);
+  let nightHorizon = vec3<f32>(0.02, 0.02, 0.08);
+  let nightSun = vec3<f32>(0.8, 0.8, 0.9);
+  
+  var skyColor: vec3<f32>;
+  var horizonColor: vec3<f32>;
+  var sunColor: vec3<f32>;
+  
+  if (sunElevation > 0.3) {
+    // Day
+    skyColor = dayColor;
+    horizonColor = dayHorizon;
+    sunColor = daySun;
+  } else if (sunElevation > -0.1) {
+    // Sunset/Sunrise
+    let t = smoothstep(-0.1, 0.3, sunElevation);
+    skyColor = mix(sunsetColor, dayColor, t);
+    horizonColor = mix(sunsetHorizon, dayHorizon, t);
+    sunColor = mix(sunsetSun, daySun, t);
+  } else if (sunElevation > -0.3) {
+    // Dusk/Dawn
+    let t = smoothstep(-0.3, -0.1, sunElevation);
+    skyColor = mix(nightColor, sunsetColor, t);
+    horizonColor = mix(nightHorizon, sunsetHorizon, t);
+    sunColor = mix(nightSun, sunsetSun, t);
+  } else {
+    // Night
+    skyColor = nightColor;
+    horizonColor = nightHorizon;
+    sunColor = nightSun;
+  }
+  
+  var color = mix(horizonColor, skyColor, horizonDot);
+  
+  // Sun rendering
+  let sunGlow = pow(sunDot, 128.0) * 2.0 + pow(sunDot, 8.0) * 0.5;
+  let glowStrength = select(0.3, 1.0, sunElevation > -0.1);
+  color += sunColor * sunGlow * glowStrength;
+  
+  // Moon rendering (visible at night)
+  let moonDir = getMoonDirection();
+  let moonDot = max(dot(rayDir, moonDir), 0.0);
+  let moonElevation = moonDir.y;
+  
+  if (moonElevation > 0.0 && sunElevation < 0.0) {
+    // Moon color (pale blue-white)
+    let moonColor = vec3<f32>(0.8, 0.85, 0.9);
+    let moonGlow = pow(moonDot, 256.0) * 1.5 + pow(moonDot, 16.0) * 0.3;
+    let moonStrength = smoothstep(0.0, -0.2, sunElevation); // Fade in as sun sets
+    color += moonColor * moonGlow * moonStrength;
+  }
+  
+  return color;
+}
+
+fn getFogColor(sunDir: vec3<f32>) -> vec3<f32> {
+  let sunElevation = sunDir.y;
+  
+  // Fog color changes with time of day
+  if (sunElevation > 0.3) {
+    return vec3<f32>(0.7, 0.85, 1.0); // Day fog (light blue)
+  } else if (sunElevation > -0.1) {
+    let t = smoothstep(-0.1, 0.3, sunElevation);
+    return mix(vec3<f32>(0.8, 0.5, 0.4), vec3<f32>(0.7, 0.85, 1.0), t); // Sunset fog (orange)
+  } else {
+    return vec3<f32>(0.05, 0.05, 0.1); // Night fog (dark blue)
+  }
+}
+
+// ============================================================================
 // Material System
 // ============================================================================
 
@@ -116,28 +230,19 @@ fn getMaterial(block_id: u32) -> BlockMaterial {
 // Lighting & Atmosphere
 // ============================================================================
 
-const PI = 3.14159265359;
+const ENABLE_SHADOWS = true;  // Toggle shadows (expensive - costs ~30% FPS)
 
-fn getSunDirection() -> vec3<f32> {
-  // Simple fixed sun direction for now
-  return normalize(vec3<f32>(0.5, 1.0, 0.3));
-}
-
-fn getSkyColor(rayDir: vec3<f32>, sunDir: vec3<f32>) -> vec3<f32> {
-  let sunDot = max(dot(rayDir, sunDir), 0.0);
-  let horizonDot = abs(rayDir.y);
+fn softShadowSVDAG(origin: vec3<f32>, lightDir: vec3<f32>) -> f32 {
+  // Raymarch toward sun to check for occlusion
+  let shadow_hit = raymarchSVDAG(origin + lightDir * 0.1, lightDir, true); // Use Opaque DAG
   
-  // Sky gradient
-  let skyColor = mix(
-    vec3<f32>(0.5, 0.7, 1.0),  // Horizon (lighter blue)
-    vec3<f32>(0.1, 0.3, 0.8),  // Zenith (darker blue)
-    pow(horizonDot, 0.5)
-  );
+  if (shadow_hit.block_id > 0u && shadow_hit.distance < 20.0) {
+    // Soft shadow with penumbra (gradual darkening)
+    let penumbra = smoothstep(0.0, 15.0, shadow_hit.distance);
+    return mix(0.4, 1.0, penumbra); // 40% shadow at close range (lighter)
+  }
   
-  // Sun glow
-  let sunGlow = pow(sunDot, 32.0) * 0.5;
-  
-  return skyColor + vec3<f32>(sunGlow);
+  return 1.0; // No shadow
 }
 
 fn fresnelSchlick(cosTheta: f32, n1: f32, n2: f32) -> f32 {
@@ -467,10 +572,42 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let material = getMaterial(hit.block_id);
     let baseColor = vec3<f32>(material.colorR, material.colorG, material.colorB);
     
-    // Directional lighting
+    let sunElevation = sunDir.y;
+    
+    // Calculate hit position from ray
+    let hitPosition = camera.position + rayDir * hit.distance;
+    
+    // Directional lighting from sun
     let diffuse = max(dot(hit.normal, sunDir), 0.0);
-    let ambient = 0.4;
-    let lighting = ambient + diffuse * 0.6;
+    
+    // Moonlight at night (weaker than sunlight)
+    let moonDir = getMoonDirection();
+    let moonElevation = moonDir.y;
+    let moonDiffuse = max(dot(hit.normal, moonDir), 0.0);
+    let moonStrength = select(0.0, 0.15, moonElevation > 0.0 && sunElevation < 0.0);
+    
+    // Soft shadows (expensive!)
+    var shadow = 1.0;
+    if (ENABLE_SHADOWS && sunElevation > -0.2 && hit.distance < 80.0) {
+      // Only cast shadows during day/sunset (not at night) and for nearby terrain
+      shadow = softShadowSVDAG(hitPosition + hit.normal * 0.1, sunDir);
+    }
+    
+    // Time-based ambient lighting (darker at night)
+    var ambient: f32;
+    if (sunElevation > 0.3) {
+      ambient = 0.55; // Bright day
+    } else if (sunElevation > -0.1) {
+      ambient = mix(0.25, 0.55, smoothstep(-0.1, 0.3, sunElevation)); // Sunset
+    } else {
+      ambient = mix(0.05, 0.25, smoothstep(-0.3, -0.1, sunElevation)); // Night
+    }
+    
+    // Sky light (fake ambient occlusion - upward faces get more light)
+    let skyLight = 0.2 * (1.0 - max(dot(hit.normal, vec3<f32>(0.0, -1.0, 0.0)), 0.0));
+    
+    // Combine all lighting: ambient + sky + sun + moon
+    let lighting = min(ambient + skyLight + diffuse * shadow * 0.6 + moonDiffuse * moonStrength, 1.0);
     
     var finalColor = baseColor * lighting;
     
@@ -552,6 +689,30 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       let waterColor = vec3<f32>(transparentMaterial.colorR, transparentMaterial.colorG, transparentMaterial.colorB);
       // Show deep/murky water - completely replace sky
       color = waterColor * 0.3; // Dark blue water (30% brightness)
+    }
+  }
+  
+  // ============================================================================
+  // EXPONENTIAL DISTANCE FOG
+  // ============================================================================
+  if (hit.block_id > 0u && timeParams.fogStart < timeParams.fogEnd) {
+    let distance = hit.distance;
+    let fogColor = getFogColor(sunDir);
+    
+    // Exponential fog formula: fog = 1 - exp(-density * distance)
+    // Map [fogStart, fogEnd] to [0, infinity] for exponential curve
+    if (distance > timeParams.fogStart) {
+      let fogRange = timeParams.fogEnd - timeParams.fogStart;
+      let distanceInFog = distance - timeParams.fogStart;
+      
+      // Exponential fog density (adjust multiplier to control curve steepness)
+      // Higher multiplier = faster fog falloff
+      let fogDensity = 3.0 / fogRange; // 3.0 gives nice exponential curve
+      let fogFactor = 1.0 - exp(-fogDensity * distanceInFog);
+      
+      // Clamp to [0, 1] and mix
+      let finalFogFactor = clamp(fogFactor, 0.0, 1.0);
+      color = mix(color, fogColor, finalFogFactor);
     }
   }
   

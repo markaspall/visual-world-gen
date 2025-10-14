@@ -301,6 +301,36 @@
         Test different settings above to find the bug!
       </div>
     </div>
+    <hr style="border: none; border-top: 1px solid #333; margin: 10px 0;">
+    <h4>🌅 Atmosphere</h4>
+    <label>
+      <input type="checkbox" id="enable-shadows" checked>
+      <span>☀️ Enable Shadows (costs ~30% FPS)</span>
+    </label>
+    <div style="margin: 10px 0;">
+      <label style="display: block; margin-bottom: 5px;">
+        <span id="time-label">Time of Day: Sunrise</span>
+      </label>
+      <input type="range" id="time-slider" min="0" max="100" value="25" style="width: 100%;">
+      <div style="font-size: 10px; color: #666; margin-top: 5px;">
+        0=Midnight, 25=Sunrise, 50=Noon, 75=Sunset
+      </div>
+    </div>
+    <div style="margin: 10px 0;">
+      <label style="display: block; margin-bottom: 5px;">
+        <span id="fog-start-label">Fog Start: 80m</span>
+      </label>
+      <input type="range" id="fog-start-slider" min="0" max="200" value="80" style="width: 100%;">
+    </div>
+    <div style="margin: 10px 0;">
+      <label style="display: block; margin-bottom: 5px;">
+        <span id="fog-end-label">Fog End: 150m</span>
+      </label>
+      <input type="range" id="fog-end-slider" min="0" max="300" value="150" style="width: 100%;">
+      <div style="font-size: 10px; color: #666; margin-top: 5px;">
+        Exponential fog: 0=No fog, closer values=denser
+      </div>
+    </div>
   </div>
   
   <script type="module">
@@ -450,6 +480,46 @@
         const value = parseInt(e.target.value);
         renderer.epsilonScale = value / 10.0; // Convert 0-100 slider to 0-10 scale
         document.getElementById('epsilon-label').textContent = `Epsilon: ${renderer.epsilonScale.toFixed(3)}`;
+      });
+      
+      // Shadow toggle
+      document.getElementById('enable-shadows').addEventListener('change', (e) => {
+        console.log('⚠️ Shadow toggle requires shader recompile - please refresh page after changing');
+        // Note: ENABLE_SHADOWS is a shader constant, so this requires reload
+        // In production, you'd pass this as a uniform buffer parameter
+      });
+      
+      // Time of day slider
+      document.getElementById('time-slider').addEventListener('input', (e) => {
+        const value = parseInt(e.target.value);
+        renderer.timeOfDay = value / 100.0; // 0-100 slider to 0-1
+        renderer.pauseTime = true; // Pause automatic cycle when manually adjusting
+        
+        let timeLabel = 'Midnight';
+        if (value < 15) timeLabel = 'Midnight';
+        else if (value < 35) timeLabel = 'Sunrise';
+        else if (value < 65) timeLabel = 'Noon';
+        else if (value < 85) timeLabel = 'Sunset';
+        else timeLabel = 'Night';
+        
+        document.getElementById('time-label').textContent = `Time of Day: ${timeLabel}`;
+        renderer.markDirty();
+      });
+      
+      // Fog start slider
+      document.getElementById('fog-start-slider').addEventListener('input', (e) => {
+        const value = parseInt(e.target.value);
+        renderer.fogStart = value;
+        document.getElementById('fog-start-label').textContent = `Fog Start: ${value}m`;
+        renderer.markDirty();
+      });
+      
+      // Fog end slider
+      document.getElementById('fog-end-slider').addEventListener('input', (e) => {
+        const value = parseInt(e.target.value);
+        renderer.fogEnd = value;
+        document.getElementById('fog-end-label').textContent = `Fog End: ${value}m`;
+        renderer.markDirty();
       });
       
       // Traversal controls

@@ -237,7 +237,7 @@ export class SvdagRenderer {
     
     // Frame caching / dirty flags
     this.frameDirty = true;  // Always render first frame
-    this.pauseTime = true;  // FREEZE TIME - set to false to enable day/night cycle
+    this.pauseTime = false;  // FREEZE TIME - set to false to enable day/night cycle
     this.lastCameraState = null;
     this.lastTimeState = null;
     this.framesSaved = 0;
@@ -253,6 +253,11 @@ export class SvdagRenderer {
     };
     
     this.time = 0;
+    this.timeOfDay = 0.25; // 0.25 = sunrise, 0.5 = noon, 0.75 = sunset, 0.0/1.0 = midnight
+    
+    // Fog parameters (controllable via sliders)
+    this.fogStart = 80.0;  // Distance where fog starts
+    this.fogEnd = 150.0;   // Distance where fog is 100%
   }
 
   async initialize(worldData) {
@@ -703,7 +708,8 @@ export class SvdagRenderer {
         { binding: 4, resource: this.outputTexture.createView() },
         { binding: 5, resource: { buffer: this.materialsBuffer } },
         { binding: 6, resource: { buffer: this.svdagOpaqueNodesBuffer } },
-        { binding: 7, resource: { buffer: this.svdagOpaqueLeavesBuffer } }
+        { binding: 7, resource: { buffer: this.svdagOpaqueLeavesBuffer } },
+        { binding: 8, resource: { buffer: this.timeParamsBuffer } }
       ]
     });
   }
@@ -895,20 +901,19 @@ export class SvdagRenderer {
     if (!this.pauseTime) {
       this.time += 0.016;
       
+      // Advance day/night cycle
+      const dayNightCycleSeconds = 60.0;
+      this.timeOfDay = (this.time / dayNightCycleSeconds) % 1.0;
+      
       // Mark frame dirty so it re-renders with new time
       this.frameDirty = true;
     }
     
-    // Convert elapsed time to time of day (0-1 cycle)
-    // Full day/night cycle every 60 seconds
-    const dayNightCycleSeconds = 60.0;
-    const timeOfDay = (this.time / dayNightCycleSeconds) % 1.0;
-    
     const timeData = new Float32Array([
-      this.time,        // time (raw, for animations)
-      timeOfDay,        // timeOfDay (0-1 cycle, for sun/lighting)
-      200.0,            // fogDistance (max fog distance)
-      0.005             // fogDensity (not used anymore, calculated in shader)
+      this.time,          // time (raw, for animations)
+      this.timeOfDay,     // timeOfDay (0-1 cycle, for sun/lighting)
+      this.fogStart,      // fogStart (controllable distance)
+      this.fogEnd         // fogEnd (controllable distance)
     ]);
     this.device.queue.writeBuffer(this.timeParamsBuffer, 0, timeData);
   }
