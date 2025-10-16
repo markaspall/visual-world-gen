@@ -2,6 +2,7 @@ import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs/promises';
+import chunkRoutes from './server/routes/chunks.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -220,8 +221,19 @@ app.get('/worlds/:worldId/svdag', (req, res) => {
   });
 });
 
+// Render chunked SVDAG renderer page (NEW - infinite world)
+app.get('/worlds/:worldId/infinite', (req, res) => {
+  res.render('worldInfinite', {
+    worldId: req.params.worldId
+  });
+});
+
+// Mount chunk API routes
+app.use('/api', chunkRoutes);
+
 app.listen(PORT, () => {
   console.log(`🚀 Server running at http://localhost:${PORT}`);
   console.log(`📁 Storage directory: ${STORAGE_DIR}`);
   console.log(`🌍 Worlds directory: ${WORLDS_DIR}`);
+  console.log(`📦 Server-side chunk generation enabled`);
 });

@@ -1,18 +1,20 @@
 {
   "name": "visual-world-gen",
-  "version": "1.0.0",
-  "description": "Browser-based procedural map generation system with WebGPU",
+  "version": "2.0.0",
+  "description": "Browser-based procedural map generation system with WebGPU and server-side chunk generation",
   "main": "server.js",
   "type": "module",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "test:gpu": "node server/test-gpu.js"
   },
-  "keywords": ["webgpu", "procedural", "map-generation", "node-editor"],
+  "keywords": ["webgpu", "procedural", "map-generation", "node-editor", "svdag", "voxel"],
   "author": "",
   "license": "MIT",
   "dependencies": {
     "express": "^4.18.2",
-    "ejs": "^3.1.9"
+    "ejs": "^3.1.9",
+    "webgpu": "latest"
   }
 }
