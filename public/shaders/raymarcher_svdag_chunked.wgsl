@@ -429,13 +429,23 @@ fn raymarchChunks(ray_origin: vec3<f32>, ray_dir: vec3<f32>) -> Hit {
   closest_hit.chunk_index = -1;
   closest_hit.steps = 0u;
   
-  let max_dist = 200.0;
+  // Adaptive view distance based on loaded chunk count
+  // If memory is tight, reduce distance to prevent thrashing
+  let chunks_loaded = f32(renderParams.max_chunks);
+  var max_dist = 800.0;  // Default: 25 chunks
+  
+  if (chunks_loaded > 380.0) {
+    max_dist = 320.0;  // Reduce to 10 chunks when near limit
+  } else if (chunks_loaded > 300.0) {
+    max_dist = 480.0;  // Reduce to 15 chunks
+  }
+  
   let camera_chunk = worldToChunk(camera.position);
   
   // Initialize DDA
   var dda = initDDA(ray_origin, ray_dir);
   var steps = 0;
-  let max_steps = 100;
+  let max_steps = 150;  // Increased for longer distances
   
   // March through chunk grid using DDA
   while (steps < max_steps) {

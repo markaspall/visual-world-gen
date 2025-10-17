@@ -36,6 +36,12 @@ export class ChunkedSvdagRenderer {
     this.viewDistanceChunks = 16;
     this.gridSize = this.viewDistanceChunks * 2 + 1;  // 33
     this.requestBufferSize = this.gridSize ** 3;  // 35,937
+    this.isProcessingRequests = false;  // Prevent concurrent reads
+    
+    // Logging throttle
+    this.lastRequestCount = 0;
+    this.lastLogTime = 0;
+    this.stableFrames = 0;
     
     // Camera (DEBUG: Center of test chunk 0,4,0 at world [0-32, 128-160, 0-32])
     this.camera = {
@@ -182,7 +188,7 @@ export class ChunkedSvdagRenderer {
     
     // Create placeholder buffers (will be updated when chunks load)
     this.chunkMetadataBuffer = this.device.createBuffer({
-      size: 1024 * 32, // 100 chunks max
+      size: 1024 * 128, // 400 chunks max (32 bytes per chunk * 400 = 12.8KB)
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
     });
     
@@ -289,7 +295,37 @@ export class ChunkedSvdagRenderer {
     this.device.queue.writeBuffer(this.cameraBuffer, 0, cameraData);
   }
 
+  indexToChunk(index, cameraChunk) {
+    // Convert request buffer index back to chunk coordinates
+    // Reverse of chunkToRequestIndex from shader
+    
+    const gridSize = this.gridSize;  // 33
+    const halfGrid = Math.floor(gridSize / 2);  // 16
+    
+    // Extract 3D coordinates from 1D index
+    const gz = Math.floor(index / (gridSize * gridSize));
+    const gy = Math.floor((index % (gridSize * gridSize)) / gridSize);
+    const gx = index % gridSize;
+    
+    // Convert from grid space [0, 33) to relative space [-16, +16]
+    const relX = gx - halfGrid;
+    const relY = gy - halfGrid;
+    const relZ = gz - halfGrid;
+    
+    // Add camera chunk to get world chunk coordinates
+    return {
+      cx: cameraChunk.cx + relX,
+      cy: cameraChunk.cy + relY,
+      cz: cameraChunk.cz + relZ
+    };
+  }
+
   async updateChunks() {
+    // OLD VISIBILITY SCANNER DISABLED - Request-on-miss handles chunk loading now!
+    // This will be fully removed in Stage 5
+    return;
+    
+    /* DISABLED OLD CODE:
     const startTime = performance.now();
     
     // Check if we can reuse cached scan results
@@ -347,8 +383,8 @@ export class ChunkedSvdagRenderer {
     const loadTime = performance.now() - loadStartTime;
     console.log(`📦 Loaded ${chunksToLoad.length} chunks (${loadTime.toFixed(1)}ms, ${(loadTime/chunksToLoad.length).toFixed(1)}ms per chunk)`);
     
-    // Phase 3: Evict non-visible chunks
-    this.evictNonVisibleChunks(neededChunks);
+    // Phase 3: Evict non-visible chunks (DISABLED - new system handles this in Stage 4)
+    // this.evictNonVisibleChunks(neededChunks);
     console.log(`📊 Total chunks in memory: ${this.chunkManager.chunks.size}`);
     
     // Upload chunk data to GPU
@@ -416,6 +452,7 @@ export class ChunkedSvdagRenderer {
       this.debugMode  // debug_mode
     ]);
     this.device.queue.writeBuffer(this.renderParamsBuffer, 0, renderParams);
+    */
   }
   
   evictNonVisibleChunks(visibleChunks) {
@@ -527,6 +564,207 @@ export class ChunkedSvdagRenderer {
     return Math.sqrt(dx*dx + dy*dy + dz*dz);
   }
 
+  async readChunkRequests() {
+    // Read the request buffer from GPU
+    
+    const commandEncoder = this.device.createCommandEncoder();
+    
+    // Copy GPU buffer to staging buffer
+    commandEncoder.copyBufferToBuffer(
+      this.chunkRequestBuffer, 0,
+      this.chunkRequestStaging, 0,
+      this.requestBufferSize * 4
+    );
+    
+    this.device.queue.submit([commandEncoder.finish()]);
+    
+    // Wait for copy to complete and read
+    await this.chunkRequestStaging.mapAsync(GPUMapMode.READ);
+    const requestData = new Uint32Array(
+      this.chunkRequestStaging.getMappedRange()
+    );
+    
+    // Extract non-zero requests
+    const requestedChunks = [];
+    const cameraChunk = this.chunkManager.worldToChunk(
+      this.camera.position[0],
+      this.camera.position[1],
+      this.camera.position[2]
+    );
+    
+    for (let i = 0; i < this.requestBufferSize; i++) {
+      if (requestData[i] > 0) {
+        const chunk = this.indexToChunk(i, cameraChunk);
+        requestedChunks.push({
+          cx: chunk.cx,
+          cy: chunk.cy,
+          cz: chunk.cz,
+          requestCount: requestData[i]  // How many rays requested this chunk
+        });
+      }
+    }
+    
+    this.chunkRequestStaging.unmap();
+    
+    // Clear request buffer for next frame
+    const clearData = new Uint32Array(this.requestBufferSize);
+    this.device.queue.writeBuffer(this.chunkRequestBuffer, 0, clearData);
+    
+    return requestedChunks;
+  }
+
+  async processChunkRequests() {
+    // Prevent concurrent buffer reads
+    if (this.isProcessingRequests) {
+      return;  // Still processing previous frame
+    }
+    
+    this.isProcessingRequests = true;
+    
+    try {
+      // Update camera position for distance-based eviction
+      this.chunkManager.updateCameraPosition(
+        this.camera.position[0],
+        this.camera.position[1],
+        this.camera.position[2]
+      );
+      
+      // Read what chunks rays requested
+      const requested = await this.readChunkRequests();
+      
+      // Smart logging: only log on changes or when stable
+      const now = performance.now();
+      const requestChange = Math.abs(requested.length - this.lastRequestCount);
+      const timeSinceLog = now - this.lastLogTime;
+      
+      if (requested.length === 0) {
+        if (this.lastRequestCount > 0) {
+          this.stableFrames++;
+          if (this.stableFrames === 60) {
+            console.log(`✅ System stable - no new chunks needed (${this.chunkManager.chunks.size} loaded)`);
+          }
+        }
+        this.lastRequestCount = 0;
+        return;  // No requests this frame
+      }
+      
+      this.stableFrames = 0;
+      
+      // Log if: significant change OR 2 seconds passed
+      const shouldLog = requestChange > 10 || timeSinceLog > 2000;
+      
+      if (shouldLog) {
+        const chunkCoords = requested.slice(0, 3).map(c => `(${c.cx},${c.cy},${c.cz})`).join(', ');
+        console.log(`🎯 ${requested.length} chunks requested: ${chunkCoords}${requested.length > 3 ? '...' : ''}`);
+        this.lastLogTime = now;
+      }
+      
+      this.lastRequestCount = requested.length;
+      
+      // Sort by request count (chunks hit by most rays first)
+      requested.sort((a, b) => b.requestCount - a.requestCount);
+      
+      // Limit how many we load per frame (prevent stalls)
+      const maxPerFrame = 200;  // Increased - we need to keep up with demand!
+      const toLoad = requested.slice(0, maxPerFrame);
+      
+      // Load in parallel batches
+      const maxParallel = 8;
+      let loaded = 0;
+      
+      for (let i = 0; i < toLoad.length; i += maxParallel) {
+        const batch = toLoad.slice(i, i + maxParallel);
+        await Promise.all(batch.map(c => 
+          this.chunkManager.loadChunk(c.cx, c.cy, c.cz)
+            .then(() => loaded++)
+            .catch(err => console.warn(`Failed to load chunk (${c.cx},${c.cy},${c.cz}):`, err))
+        ));
+      }
+      
+      if (loaded > 0) {
+        // Only log if we logged the request
+        if (shouldLog) {
+          console.log(`📦 Loaded ${loaded}/${requested.length} | Total in memory: ${this.chunkManager.chunks.size}`);
+        }
+        
+        // Evict distant chunks if over limit (ONCE per frame, not per chunk!)
+        if (this.chunkManager.chunks.size > this.chunkManager.maxCachedChunks) {
+          this.chunkManager.evictOldChunks(this.cameraPosition);
+        }
+        
+        // Upload newly loaded chunks to GPU
+        this.uploadChunksToGPU();
+      }
+    } finally {
+      this.isProcessingRequests = false;
+    }
+  }
+
+  uploadChunksToGPU() {
+    // Get all loaded chunks and upload to GPU
+    const chunks = this.chunkManager.getLoadedChunks();
+    if (chunks.length === 0) {
+      return;
+    }
+    
+    // Build chunk metadata
+    const metadata = new Float32Array(chunks.length * 8);
+    let nodesOffset = 0;
+    let leavesOffset = 0;
+    const allNodes = [];
+    const allLeaves = [];
+    
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i];
+      const offset = i * 8;
+      
+      // World offset (chunk position * chunk size)
+      metadata[offset + 0] = chunk.cx * 32;
+      metadata[offset + 1] = chunk.cy * 32;
+      metadata[offset + 2] = chunk.cz * 32;
+      metadata[offset + 3] = 32; // chunk size
+      
+      // Material SVDAG - store root index (offset into combined buffer) + node count
+      const matRootInCombined = nodesOffset + chunk.materialSVDAG.rootIdx;
+      metadata[offset + 4] = matRootInCombined;
+      metadata[offset + 5] = chunk.materialSVDAG.nodes.length;
+      
+      // Add material nodes/leaves to combined buffers
+      allNodes.push(...chunk.materialSVDAG.nodes);
+      allLeaves.push(...chunk.materialSVDAG.leaves);
+      
+      const matNodesCount = chunk.materialSVDAG.nodes.length;
+      nodesOffset += matNodesCount;
+      leavesOffset += chunk.materialSVDAG.leaves.length;
+      
+      // Opaque SVDAG - store root index (offset into combined buffer) + node count
+      const opqRootInCombined = nodesOffset + chunk.opaqueSVDAG.rootIdx;
+      metadata[offset + 6] = opqRootInCombined;
+      metadata[offset + 7] = chunk.opaqueSVDAG.nodes.length;
+      
+      // Add opaque nodes/leaves to combined buffers
+      allNodes.push(...chunk.opaqueSVDAG.nodes);
+      allLeaves.push(...chunk.opaqueSVDAG.leaves);
+      
+      nodesOffset += chunk.opaqueSVDAG.nodes.length;
+      leavesOffset += chunk.opaqueSVDAG.leaves.length;
+    }
+    
+    // Upload to GPU
+    this.device.queue.writeBuffer(this.chunkMetadataBuffer, 0, metadata);
+    this.device.queue.writeBuffer(this.svdagNodesBuffer, 0, new Uint32Array(allNodes));
+    this.device.queue.writeBuffer(this.svdagLeavesBuffer, 0, new Uint32Array(allLeaves));
+    
+    // Update render params
+    const renderParams = new Uint32Array([
+      chunks.length, // max_chunks
+      32, // chunk_size (as u32)
+      5, // max_depth
+      this.debugMode  // debug_mode
+    ]);
+    this.device.queue.writeBuffer(this.renderParamsBuffer, 0, renderParams);
+  }
+
   async render() {
     // Update time
     const now = performance.now();
@@ -585,6 +823,14 @@ export class ChunkedSvdagRenderer {
     renderPass.end();
     
     this.device.queue.submit([commandEncoder.finish()]);
+    
+    // Process chunk requests (async, don't block)
+    // Skip first few frames while system initializes
+    if (this.frameCount > 10) {
+      this.processChunkRequests().catch(err => 
+        console.error('Error processing chunk requests:', err)
+      );
+    }
   }
 
   moveCamera(forward, right, up) {

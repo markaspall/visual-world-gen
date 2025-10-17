@@ -16,9 +16,12 @@ export class ChunkManager {
     this.loading = new Set();
     
     // Configuration
-    this.maxCachedChunks = 200; // Keep 200 chunks in memory (don't evict so aggressively)
+    this.maxCachedChunks = 400; // Increased for request-on-miss system (Stage 4 will add smart eviction)
     this.chunkSize = 32; // 32x32x32 voxels
     this.loadRadius = 2; // Load chunks within 2 chunk radius (5x5x5 = 125 chunks)
+    
+    // Camera position for distance-based eviction
+    this.cameraPosition = [0, 0, 0];
     
     // Statistics
     this.stats = {
@@ -200,14 +203,16 @@ export class ChunkManager {
       const chunkData = await this.fetchChunk(cx, cy, cz);
       
       if (chunkData) {
-        // Add to cache
-        this.chunks.set(key, { cx, cy, cz, ...chunkData });
+        // Add to cache with timestamp
+        this.chunks.set(key, { 
+          cx, cy, cz, 
+          ...chunkData,
+          loadedFrame: Date.now(),  // Track when loaded
+          lastAccessFrame: Date.now()  // Track last access
+        });
         this.stats.chunksLoaded++;
         
-        // Evict old chunks if cache is full
-        if (this.chunks.size > this.maxCachedChunks) {
-          this.evictOldChunks();
-        }
+        // NOTE: Eviction moved to renderer (once per frame, not per chunk)
         
         return this.chunks.get(key);
       }
@@ -289,17 +294,65 @@ export class ChunkManager {
   /**
    * Evict oldest chunks to free memory
    */
-  evictOldChunks() {
-    const toRemove = this.chunks.size - this.maxCachedChunks + 5; // Remove 5 extra
+  evictOldChunks(cameraPos = null) {
+    const toRemove = this.chunks.size - this.maxCachedChunks + 10; // Remove 10 extra for headroom
     if (toRemove <= 0) return;
     
-    // Remove oldest chunks (simple FIFO for now)
-    let removed = 0;
-    for (const key of this.chunks.keys()) {
-      this.chunks.delete(key);
-      removed++;
-      if (removed >= toRemove) break;
+    // NEW: Distance-first eviction (distance >> age)
+    if (cameraPos) {
+      const camChunk = this.worldToChunk(cameraPos[0], cameraPos[1], cameraPos[2]);
+      const now = Date.now();
+      const protectRadius = 3; // Only protect chunks within 3 chunk radius
+      const minAge = 1000; // 1 second minimum age (reduced)
+      
+      // Score chunks by distance from camera
+      const scored = Array.from(this.chunks.entries()).map(([key, chunk]) => {
+        const dx = chunk.cx - camChunk.cx;
+        const dy = chunk.cy - camChunk.cy;
+        const dz = chunk.cz - camChunk.cz;
+        const distSq = dx*dx + dy*dy + dz*dz;
+        const distance = Math.sqrt(distSq);
+        const age = now - (chunk.loadedFrame || 0);
+        
+        // Only protect nearby AND recent chunks
+        const isNearby = distance <= protectRadius;
+        const isRecent = age < minAge;
+        const isProtected = isNearby && isRecent;
+        
+        return { key, distSq, distance, age, isProtected };
+      });
+      
+      // Filter out protected, sort by distance (furthest first)
+      const evictable = scored.filter(s => !s.isProtected);
+      evictable.sort((a, b) => b.distSq - a.distSq);
+      
+      // Remove furthest chunks
+      const actualRemove = Math.min(toRemove, evictable.length);
+      for (let i = 0; i < actualRemove; i++) {
+        this.chunks.delete(evictable[i].key);
+      }
+      
+      // Only log if significant eviction happened
+      if (actualRemove >= 10) {
+        const protectedCount = scored.length - evictable.length;
+        console.log(`🗑️ Evicted ${actualRemove} distant chunks (${this.chunks.size} remain${protectedCount > 0 ? `, ${protectedCount} protected nearby` : ''})`);
+      }
+    } else {
+      // Fallback: Remove oldest chunks (simple FIFO)
+      let removed = 0;
+      for (const key of this.chunks.keys()) {
+        this.chunks.delete(key);
+        removed++;
+        if (removed >= toRemove) break;
+      }
     }
+  }
+
+  /**
+   * Update camera position for distance-based eviction
+   */
+  updateCameraPosition(x, y, z) {
+    this.cameraPosition = [x, y, z];
   }
 
   /**
