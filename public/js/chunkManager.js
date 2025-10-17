@@ -121,18 +121,6 @@ export class ChunkManager {
     const opqRootIdx = view.getUint32(offset, true); offset += 4;
     const opqNodeCount = view.getUint32(offset, true); offset += 4;
 
-    console.log(`📋 Header: magic=${magic.toString(16)}, nodes=${matNodeCount}, leaves=${matLeafCount}, root=${matRootIdx}, offset after header=${offset}`);
-    
-    // Debug: Show first 20 bytes after header
-    if (matNodeCount > 0) {
-      const bytesAtOffset40 = [];
-      for (let i = 0; i < Math.min(20, arrayBuffer.byteLength - 40); i++) {
-        bytesAtOffset40.push(view.getUint8(40 + i).toString(16).padStart(2, '0'));
-      }
-      console.log(`🔍 Bytes at offset 40:`, bytesAtOffset40.join(' '));
-      console.log(`🔍 Value at offset 40 as u32:`, view.getUint32(40, true).toString(16));
-    }
-
     // Read material nodes (copy to avoid offset issues)
     const matNodes = new Uint32Array(matNodeCount);
     for (let i = 0; i < matNodeCount; i++) {
@@ -162,8 +150,6 @@ export class ChunkManager {
       opqLeaves[i] = view.getUint32(offset, true);
       offset += 4;
     }
-
-    console.log(`📋 After decode: matNodes[0]=${matNodes[0]}, matLeaves[0]=${matLeaves[0]}, offset=${offset}, total=${arrayBuffer.byteLength}`);
 
     return {
       version,
@@ -235,24 +221,25 @@ export class ChunkManager {
 
   /**
    * Load chunks around a world position
+   * Uses sphere-based loading - loads chunks ray might intersect
    */
   async loadChunksAround(worldX, worldY, worldZ) {
     const center = this.worldToChunk(worldX, worldY, worldZ);
-    const radius = this.loadRadius;
+    const loadRadius = 3;  // 3 chunk radius = ~96 blocks view distance
     
     const chunksToLoad = [];
     
-    // Find all chunks in radius
-    for (let dx = -radius; dx <= radius; dx++) {
-      for (let dy = -radius; dy <= radius; dy++) {
-        for (let dz = -radius; dz <= radius; dz++) {
+    // Load in 3D sphere (any chunk ray might traverse)
+    for (let dx = -loadRadius; dx <= loadRadius; dx++) {
+      for (let dy = -loadRadius; dy <= loadRadius; dy++) {
+        for (let dz = -loadRadius; dz <= loadRadius; dz++) {
           const cx = center.cx + dx;
           const cy = center.cy + dy;
           const cz = center.cz + dz;
           
-          // Distance check (sphere)
+          // Spherical distance check
           const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-          if (dist <= radius) {
+          if (dist <= loadRadius) {
             const key = this.getChunkKey(cx, cy, cz);
             if (!this.chunks.has(key) && !this.loading.has(key)) {
               chunksToLoad.push({ cx, cy, cz, dist });
@@ -265,18 +252,40 @@ export class ChunkManager {
     // Sort by distance (closest first)
     chunksToLoad.sort((a, b) => a.dist - b.dist);
     
-    // Loading chunks...
-    
-    // Load chunks (with some parallelism)
-    const maxParallel = 4;
+    // Load chunks with parallelism
+    const maxParallel = 8;
     for (let i = 0; i < chunksToLoad.length; i += maxParallel) {
       const batch = chunksToLoad.slice(i, i + maxParallel);
       await Promise.all(batch.map(c => this.loadChunk(c.cx, c.cy, c.cz)));
     }
     
-    console.log(`✓ ${this.chunks.size} chunks loaded`);
+    // Evict distant chunks
+    this.evictDistantChunks(center.cx, center.cy, center.cz, loadRadius + 1);
   }
 
+  /**
+   * Evict chunks outside of view distance
+   */
+  evictDistantChunks(centerX, centerY, centerZ, maxDistance) {
+    const toEvict = [];
+    
+    for (const [key, chunk] of this.chunks.entries()) {
+      const dx = chunk.cx - centerX;
+      const dy = chunk.cy - centerY;
+      const dz = chunk.cz - centerZ;
+      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz); // 3D distance
+      
+      // Evict if too far
+      if (dist > maxDistance) {
+        toEvict.push(key);
+      }
+    }
+    
+    for (const key of toEvict) {
+      this.chunks.delete(key);
+    }
+  }
+  
   /**
    * Evict oldest chunks to free memory
    */
@@ -291,8 +300,6 @@ export class ChunkManager {
       removed++;
       if (removed >= toRemove) break;
     }
-    
-    // Evicted old chunks
   }
 
   /**

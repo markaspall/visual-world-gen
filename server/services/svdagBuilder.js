@@ -21,7 +21,7 @@ export class SVDAGBuilder {
     this.materials = options.materials || null;
     this.buildOpaqueDag = options.buildOpaque || false;
     
-    // DEBUG: Count non-air voxels
+    // DEBUG: Count non-air voxels FIRST
     let solidCount = 0;
     const blockCounts = {};
     for (let i = 0; i < voxelGrid.length; i++) {
@@ -31,34 +31,18 @@ export class SVDAGBuilder {
       }
     }
     
-    const dagType = this.buildOpaqueDag ? 'Opaque' : 'Material';
-    
-    // Only log details for small grids (debug chunks)
-    if (solidCount < 5000) {
-      console.log(`\n🧪 DEBUG ${dagType} SVDAG (size=${size}, depth=${this.maxDepth})`);
-      console.log(`   Input: ${solidCount} solid voxels`, blockCounts);
-    }
-    
     const startTime = Date.now();
     
     // Phase 1: Build octree
     this._leafCount = 0;  // Reset counter
     const root = this.buildNode(voxelGrid, 0, 0, 0, this.size, 0);
     
-    if (solidCount < 5000) {
-      console.log(`   Octree: ${this._leafCount} leaf nodes created`);
-    }
     
     // Phase 2: Flatten to DAG (deduplicate nodes)
     this.flattenProgress = 0;
     this._dedupCount = 0;
     const rootIdx = this.flattenNode(root);
     
-    if (solidCount < 5000) {
-      console.log(`   Flattened: ${Math.floor(this.nodes.length/3)} nodes, ${this.leaves.length} leaves`);
-      console.log(`   Deduplicated: ${this._dedupCount} nodes/leaves reused`);
-      console.log(`   Unique leaf blockIds:`, [...new Set(this.leaves)]);
-    }
     
     const buildTime = Date.now() - startTime;
     
@@ -70,10 +54,6 @@ export class SVDAGBuilder {
       dedupSavings: this.nodeMap.size
     };
     
-    // Only log for regular terrain chunks
-    if (solidCount >= 5000) {
-      console.log(`  ✅ ${dagType} SVDAG: ${stats.totalNodes} nodes, ${stats.totalLeaves} leaves in ${buildTime}ms`);
-    }
     
     return {
       nodesBuffer: new Uint32Array(this.nodes),

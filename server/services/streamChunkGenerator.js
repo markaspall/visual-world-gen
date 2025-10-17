@@ -74,47 +74,106 @@ export class StreamChunkGenerator {
   }
   
   /**
+   * Generate test patterns for validation
+   */
+  generateTestPattern(voxelGrid, cx, cy, cz, pattern) {
+    const chunkSize = 32;
+    
+    switch (pattern) {
+      case 'FLAT_WORLD':
+        // Completely flat world at y=0, single block type (grass)
+        // Only generate for chunks at Y=4 (world height 128)
+        if (cy === 4) {
+          // CRITICAL: Fill ONLY y=0, nothing else!
+          let written = 0;
+          for (let z = 0; z < chunkSize; z++) {
+            for (let x = 0; x < chunkSize; x++) {
+              const y = 0; // ONLY the bottom layer!
+              const voxelIdx = z * chunkSize * chunkSize + y * chunkSize + x;
+              voxelGrid[voxelIdx] = 1; // All grass
+              written++;
+            }
+          }
+        }
+        break;
+        
+      case 'CHECKERBOARD':
+        // Checkerboard pattern at y=0
+        if (cy === 4) {
+          for (let z = 0; z < chunkSize; z++) {
+            for (let x = 0; x < chunkSize; x++) {
+              const voxelIdx = z * chunkSize * chunkSize + 0 * chunkSize + x; // y=0
+              // Global checkerboard pattern across all chunks
+              const worldX = cx * chunkSize + x;
+              const worldZ = cz * chunkSize + z;
+              if ((worldX + worldZ) % 2 === 0) {
+                voxelGrid[voxelIdx] = 1; // Grass (green)
+              } else {
+                voxelGrid[voxelIdx] = 4; // Sand (tan)
+              }
+            }
+          }
+        }
+        break;
+        
+      case 'STRIPES':
+        // Vertical stripes (alternating by X coordinate)
+        if (cy === 4) {
+          for (let z = 0; z < chunkSize; z++) {
+            for (let x = 0; x < chunkSize; x++) {
+              const voxelIdx = z * chunkSize * chunkSize + 0 * chunkSize + x;
+              const worldX = cx * chunkSize + x;
+              // 4-voxel wide stripes
+              const stripeId = Math.floor(worldX / 4) % 2;
+              voxelGrid[voxelIdx] = stripeId === 0 ? 1 : 4;
+            }
+          }
+        }
+        break;
+        
+      case 'STEPS':
+        // Staircase pattern - height increases with X
+        const baseY = 4; // Start at chunk Y=4 (world y=128)
+        if (cy >= 4 && cy <= 6) {
+          for (let z = 0; z < chunkSize; z++) {
+            for (let x = 0; x < chunkSize; x++) {
+              const worldX = cx * chunkSize + x;
+              // Each 8 voxels in X, step up by 1
+              const stepHeight = Math.floor(worldX / 8);
+              const targetY = 128 + stepHeight; // World Y
+              
+              // Fill from bottom of this chunk up to target height
+              for (let y = 0; y < chunkSize; y++) {
+                const worldY = cy * chunkSize + y;
+                if (worldY <= targetY) {
+                  const voxelIdx = z * chunkSize * chunkSize + y * chunkSize + x;
+                  voxelGrid[voxelIdx] = 6; // Stone
+                }
+              }
+            }
+          }
+        }
+        break;
+    }
+    
+    return voxelGrid;
+  }
+  
+  /**
    * Extract 32x32x32 voxel grid from super chunk data
    */
   extractVoxelRegion(superChunk, cx, cy, cz, config) {
     const chunkSize = 32;
     const voxelGrid = new Uint32Array(chunkSize * chunkSize * chunkSize);
     
-    // DEBUG: Create a simple flat test chunk at origin
-    const DEBUG_FLAT_CHUNK = false; // Set to true for testing
-    if (DEBUG_FLAT_CHUNK && cx === 0 && cz === 0 && cy === 4) {
-      console.log('\n🧪 Generating CHECKERBOARD at (0,4,0)');
-      for (let z = 0; z < chunkSize; z++) {
-        for (let x = 0; x < chunkSize; x++) {
-          for (let y = 0; y < chunkSize; y++) {
-            const voxelIdx = z * chunkSize * chunkSize + y * chunkSize + x;
-            // Checkerboard pattern at y=0
-            if (y === 0) {
-              // Alternating grass (1) and sand (4) in XZ plane
-              if ((x + z) % 2 === 0) {
-                voxelGrid[voxelIdx] = 1; // Grass (green)
-              } else {
-                voxelGrid[voxelIdx] = 4; // Sand (tan)
-              }
-            } else {
-              voxelGrid[voxelIdx] = 0; // Air
-            }
-          }
-        }
-      }
-      
-      // Verify first layer
-      let grassCount = 0, sandCount = 0;
-      for (let z = 0; z < chunkSize; z++) {
-        for (let x = 0; x < chunkSize; x++) {
-          const idx = z * chunkSize * chunkSize + 0 * chunkSize + x;
-          if (voxelGrid[idx] === 1) grassCount++;
-          if (voxelGrid[idx] === 4) sandCount++;
-        }
-      }
-      console.log(`   Verified: ${grassCount} grass, ${sandCount} sand\n`);
-      
-      return voxelGrid;
+    // ========================================================================
+    // 🧪 TEST WORLD MODE - Predictable patterns for validation
+    // ========================================================================
+    const TEST_MODE = true;  // Set to true for testing
+    const TEST_PATTERN = 'CHECKERBOARD';  // Options: 'FLAT_WORLD', 'CHECKERBOARD', 'STRIPES', 'STEPS'
+    
+    if (TEST_MODE) {
+      return this.generateTestPattern(voxelGrid, cx, cy, cz, TEST_PATTERN);
     }
     
     // Convert stream chunk coord to voxel position

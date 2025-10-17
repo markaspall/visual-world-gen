@@ -133,8 +133,40 @@ fn traverseSVDAG(
   
   let chunk = chunkMetadata[u32(chunkIdx)];
   
-  // Convert to chunk-local coordinates
+  // Prevent division by zero when ray is parallel to axis (CRITICAL for precision!)
+  let eps = 1e-8;
+  let safe_ray_dir = vec3<f32>(
+    select(ray_dir.x, eps, abs(ray_dir.x) < eps),
+    select(ray_dir.y, eps, abs(ray_dir.y) < eps),
+    select(ray_dir.z, eps, abs(ray_dir.z) < eps)
+  );
+  let inv_ray_dir = vec3<f32>(1.0) / safe_ray_dir;
+  
+  // Convert to chunk-local coordinates FIRST
   let local_origin = worldToChunkLocal(ray_origin, chunkIdx);
+  
+  // Do ALL AABB tests in LOCAL space (consistent coordinate system!)
+  let chunk_min_local = vec3<f32>(0.0);
+  let chunk_max_local = vec3<f32>(chunk.chunk_size);
+  let t0_chunk = (chunk_min_local - local_origin) * inv_ray_dir;
+  let t1_chunk = (chunk_max_local - local_origin) * inv_ray_dir;
+  let tmin_chunk = min(t0_chunk, t1_chunk);
+  let tmax_chunk = max(t0_chunk, t1_chunk);
+  let t_enter = max(max(tmin_chunk.x, tmin_chunk.y), tmin_chunk.z);
+  let t_exit = min(min(tmax_chunk.x, tmax_chunk.y), tmax_chunk.z);
+  
+  // Ray misses chunk
+  if (t_enter > t_exit) {
+    return hit;
+  }
+  
+  // Chunk is completely behind ray
+  if (t_exit < 0.0) {
+    return hit;
+  }
+  
+  // t_start for octree traversal (already in correct LOCAL space)
+  let t_start = max(t_enter, 0.0);
   
   // Get root index and node count for this chunk
   let root_idx = select(chunk.material_root, chunk.opaque_root, useOpaque);
@@ -146,16 +178,16 @@ fn traverseSVDAG(
     return hit; // Empty chunk
   }
   
-  // Setup for traversal
+  // Setup for traversal (MATCH REFERENCE SHADER)
   var stack: array<StackEntry, MAX_STACK_DEPTH>;
   var stack_size = 0;
   
   let world_size = chunk.chunk_size;
-  let inv_ray_dir = vec3<f32>(1.0) / ray_dir;
   
-  // Initialize stack with root
+  // Initialize stack with root at CHUNK CENTER (not corner!)
+  let world_center = vec3<f32>(world_size * 0.5);
   stack[0].packed_idx_depth = packIdxDepth(root_idx, 0u);
-  stack[0].pos_xyz = vec3<f32>(0.0);
+  stack[0].pos_xyz = world_center;  // CENTER-BASED like reference
   stack_size = 1;
   
   var step_count = 0u;
@@ -168,55 +200,61 @@ fn traverseSVDAG(
     let entry = stack[stack_size];
     let node_idx = unpackNodeIdx(entry.packed_idx_depth);
     let depth = unpackDepth(entry.packed_idx_depth);
-    let node_pos = entry.pos_xyz;
+    let node_center = entry.pos_xyz;  // This is now CENTER
     
-    // Calculate node size
+    // Calculate node size and half-size
     let node_size = world_size / f32(1u << depth);
+    let node_half = node_size * 0.5;
+    
+    // Calculate AABB from CENTER (like reference shader)
+    let node_min = node_center - vec3<f32>(node_half);
+    let node_max = node_center + vec3<f32>(node_half);
+    let t0 = (node_min - local_origin) * inv_ray_dir;
+    let t1 = (node_max - local_origin) * inv_ray_dir;
+    let tmin = min(t0, t1);
+    let tmax = max(t0, t1);
+    let t_near = max(max(tmin.x, tmin.y), tmin.z);
+    let t_far = min(min(tmax.x, tmax.y), tmax.z);
+    let current_t = max(t_near, t_start);  // Don't go before ray entry!
+    
+    // Skip if ray doesn't hit this node or node is before entry point
+    if (t_near > t_far || t_far < t_start || current_t >= maxDist) {
+      continue;
+    }
     
     // Read node data (node_idx IS the array index, not a node number!)
     let node_tag = svdag_nodes[node_idx];
     let node_data1 = svdag_nodes[node_idx + 1u];
     
-    // Leaf node
+    // Leaf node - use current_t directly (no re-computation!)
     if (node_tag == 1u) {
       let leaf_idx = node_data1;
       let block_id = svdag_leaves[leaf_idx];
       
-      // Ray-AABB intersection (check even if block_id == 0 for debug)
-      let t_min = (node_pos - local_origin) * inv_ray_dir;
-      let t_max = (node_pos + vec3<f32>(node_size) - local_origin) * inv_ray_dir;
-      let t1 = min(t_min, t_max);
-      let t2 = max(t_min, t_max);
-      let t_near = max(max(t1.x, t1.y), t1.z);
-      let t_far = min(min(t2.x, t2.y), t2.z);
+      // Found geometry! Use current_t as hit distance
+      hit.distance = current_t;
+      hit.block_id = select(block_id, 1u, block_id == 0u); // If 0, use 1 as fallback
       
-      if (t_near <= t_far && t_far > 0.0 && t_near < maxDist) {
-        // Found geometry! Set block_id even if it's 0
-        hit.distance = max(t_near, 0.0);
-        hit.block_id = select(block_id, 1u, block_id == 0u); // If 0, use 1 as fallback
-        
-        // Calculate normal
-        let hit_point = local_origin + ray_dir * hit.distance;
-        let center = node_pos + vec3<f32>(node_size * 0.5);
-        let d = abs(hit_point - center);
-        let max_d = max(max(d.x, d.y), d.z);
-        
-        if (max_d == d.x) {
-          hit.normal = vec3<f32>(sign(hit_point.x - center.x), 0.0, 0.0);
-        } else if (max_d == d.y) {
-          hit.normal = vec3<f32>(0.0, sign(hit_point.y - center.y), 0.0);
-        } else {
-          hit.normal = vec3<f32>(0.0, 0.0, sign(hit_point.z - center.z));
-        }
-        
-        return hit;
+      // Calculate normal from AABB entry face (EXACT match with reference shader)
+      let t_near_vec = min(t0, t1);  // We already computed this above
+      let t_entry = max(max(t_near_vec.x, t_near_vec.y), t_near_vec.z);
+      
+      let epsilon = 0.001;
+      if (abs(t_entry - t_near_vec.x) < epsilon) {
+        hit.normal = vec3<f32>(-sign(ray_dir.x), 0.0, 0.0);
+      } else if (abs(t_entry - t_near_vec.y) < epsilon) {
+        hit.normal = vec3<f32>(0.0, -sign(ray_dir.y), 0.0);
+      } else {
+        hit.normal = vec3<f32>(0.0, 0.0, -sign(ray_dir.z));
       }
-      continue;
+      
+      return hit;
     }
     
-    // Inner node - traverse children
+    // Inner node - traverse children (CENTER-BASED like reference)
     let child_mask = node_data1;
     let child_size = node_size * 0.5;
+    let child_half = child_size * 0.5;
     
     // DDA traversal of children
     for (var i = 0u; i < 8u; i++) {
@@ -224,17 +262,23 @@ fn traverseSVDAG(
         let cx = f32(i & 1u);
         let cy = f32((i >> 1u) & 1u);
         let cz = f32((i >> 2u) & 1u);
-        let child_pos = node_pos + vec3<f32>(cx, cy, cz) * child_size;
         
-        // Ray-AABB intersection test
-        let t_min = (child_pos - local_origin) * inv_ray_dir;
-        let t_max = (child_pos + vec3<f32>(child_size) - local_origin) * inv_ray_dir;
-        let t1 = min(t_min, t_max);
-        let t2 = max(t_min, t_max);
-        let t_near = max(max(t1.x, t1.y), t1.z);
-        let t_far = min(min(t2.x, t2.y), t2.z);
+        // Calculate child CENTER (not corner!)
+        let child_offset = vec3<f32>(cx - 0.5, cy - 0.5, cz - 0.5) * child_size;
+        let child_center = node_center + child_offset;
         
-        if (t_near <= t_far && t_far > 0.0) {
+        // Ray-AABB intersection test from CENTER
+        let child_min = child_center - vec3<f32>(child_half);
+        let child_max = child_center + vec3<f32>(child_half);
+        let t0 = (child_min - local_origin) * inv_ray_dir;
+        let t1 = (child_max - local_origin) * inv_ray_dir;
+        let tmin_vec = min(t0, t1);
+        let tmax_vec = max(t0, t1);
+        let t_near = max(max(tmin_vec.x, tmin_vec.y), tmin_vec.z);
+        let t_far = min(min(tmax_vec.x, tmax_vec.y), tmax_vec.z);
+        
+        // Only traverse if child is on or after ray entry point
+        if (t_near <= t_far && t_far >= t_start) {
           // Count how many children come before this one in the mask
           let child_count = countOneBits(child_mask & ((1u << i) - 1u));
           // Child indices start at node_idx + 2
@@ -242,7 +286,7 @@ fn traverseSVDAG(
           
           if (stack_size < MAX_STACK_DEPTH) {
             stack[stack_size].packed_idx_depth = packIdxDepth(child_idx, depth + 1u);
-            stack[stack_size].pos_xyz = child_pos;
+            stack[stack_size].pos_xyz = child_center;  // Store CENTER
             stack_size++;
           }
         }
@@ -258,51 +302,26 @@ fn traverseSVDAG(
 // ============================================================================
 
 fn raymarchChunks(ray_origin: vec3<f32>, ray_dir: vec3<f32>) -> Hit {
-  var hit: Hit;
-  hit.distance = -1.0;
-  hit.block_id = 0u;
-  hit.chunk_index = -1;
-  hit.steps = 0u;
+  var closest_hit: Hit;
+  closest_hit.distance = -1.0;
+  closest_hit.block_id = 0u;
+  closest_hit.chunk_index = -1;
+  closest_hit.steps = 0u;
   
-  var current_pos = ray_origin;
-  var traveled = 0.0;
-  let max_dist = 200.0; // Reduced render distance
-  let step_size = renderParams.chunk_size * 0.5; // Smaller steps for better detection
+  let max_dist = 200.0;
+  var min_distance = max_dist;
   
-  var total_steps = 0u;
-  var chunks_checked = 0u;
-  
-  for (var i = 0; i < 16; i++) { // Max 16 chunk checks (reduced)
-    if (traveled >= max_dist) {
-      break;
+  // Check ALL loaded chunks, find closest hit
+  for (var i = 0u; i < renderParams.max_chunks; i++) {
+    let chunk_hit = traverseSVDAG(ray_origin, ray_dir, i32(i), false, min_distance);
+    
+    if (chunk_hit.distance >= 0.0 && chunk_hit.distance < min_distance) {
+      closest_hit = chunk_hit;
+      min_distance = chunk_hit.distance;
     }
-    
-    chunks_checked++;
-    
-    // Which chunk are we in?
-    let chunkIdx = getChunkIndex(current_pos);
-    
-    if (chunkIdx >= 0) {
-      // Traverse this chunk's SVDAG
-      let chunk_hit = traverseSVDAG(current_pos, ray_dir, chunkIdx, false, max_dist - traveled);
-      total_steps += chunk_hit.steps;
-      
-      if (chunk_hit.distance >= 0.0) {
-        hit = chunk_hit;
-        hit.distance += traveled;
-        hit.steps = total_steps;
-        return hit;
-      }
-    }
-    
-    // Step to next potential chunk
-    current_pos += ray_dir * step_size;
-    traveled += step_size;
   }
   
-  // Miss - but record steps
-  hit.steps = total_steps;
-  return hit;
+  return closest_hit;
 }
 
 // ============================================================================

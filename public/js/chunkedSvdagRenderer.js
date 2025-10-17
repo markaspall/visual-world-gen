@@ -260,44 +260,7 @@ export class ChunkedSvdagRenderer {
       return;
     }
     
-    // Debug: check if chunks have data (only log once per 5 seconds)
-    const totalNodes = chunks.reduce((sum, c) => sum + c.materialSVDAG.nodes.length + c.opaqueSVDAG.nodes.length, 0);
-    const now = Date.now();
-    if (!this._lastDebugLog || now - this._lastDebugLog > 5000) {
-      this._lastDebugLog = now;
-      console.log(`📊 ${chunks.length} chunks, ${totalNodes} nodes`);
-      
-      // Check for leaf data and terrain location
-      const chunksWithTerrain = chunks.filter(c => 
-        c.materialSVDAG.nodes.length > 0 || c.opaqueSVDAG.nodes.length > 0
-      );
-      
-      if (chunksWithTerrain.length > 0) {
-        const terrainPositions = chunksWithTerrain.slice(0, 5).map(c => 
-          `(${c.cx * 32}, ${c.cy * 32}, ${c.cz * 32})`
-        ).join(', ');
-        console.log(`🌍 Terrain at chunks: ${terrainPositions}`);
-        
-        const sampleChunk = chunksWithTerrain[0];
-        const worldPos = [sampleChunk.cx * 32, sampleChunk.cy * 32, sampleChunk.cz * 32];
-        console.log(`📦 Sample chunk at (${sampleChunk.cx}, ${sampleChunk.cy}, ${sampleChunk.cz}) = world [${worldPos.join(', ')}]:`);
-        console.log(`  Nodes: ${sampleChunk.materialSVDAG.nodes.length}, Leaves: ${sampleChunk.materialSVDAG.leaves.length}`);
-        console.log(`  Root idx: ${sampleChunk.materialSVDAG.rootIdx}`);
-        
-        if (sampleChunk.materialSVDAG.leaves.length > 0) {
-          // Log raw leaf data (first 20)
-          const rawLeaves = Array.from(sampleChunk.materialSVDAG.leaves).slice(0, 20);
-          console.log(`  Raw leaves (first 20):`, rawLeaves);
-          console.log(`  Leaf values > 255:`, rawLeaves.filter(v => v > 255));
-        }
-        
-        if (sampleChunk.materialSVDAG.nodes.length > 0) {
-          // Log first few nodes
-          const rawNodes = Array.from(sampleChunk.materialSVDAG.nodes).slice(0, 12);
-          console.log(`  Raw nodes (first 12):`, rawNodes);
-        }
-      }
-    }
+    // Silent operation - logs removed for clarity
     
     // Build chunk metadata
     const metadata = new Float32Array(chunks.length * 8);
