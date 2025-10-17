@@ -142,14 +142,11 @@ fn traverseSVDAG(
   );
   let inv_ray_dir = vec3<f32>(1.0) / safe_ray_dir;
   
-  // Convert to chunk-local coordinates FIRST
-  let local_origin = worldToChunkLocal(ray_origin, chunkIdx);
-  
-  // Do ALL AABB tests in LOCAL space (consistent coordinate system!)
-  let chunk_min_local = vec3<f32>(0.0);
-  let chunk_max_local = vec3<f32>(chunk.chunk_size);
-  let t0_chunk = (chunk_min_local - local_origin) * inv_ray_dir;
-  let t1_chunk = (chunk_max_local - local_origin) * inv_ray_dir;
+  // CRITICAL: Do chunk AABB test in WORLD space
+  let chunk_min_world = chunk.world_offset;
+  let chunk_max_world = chunk.world_offset + vec3<f32>(chunk.chunk_size);
+  let t0_chunk = (chunk_min_world - ray_origin) * inv_ray_dir;
+  let t1_chunk = (chunk_max_world - ray_origin) * inv_ray_dir;
   let tmin_chunk = min(t0_chunk, t1_chunk);
   let tmax_chunk = max(t0_chunk, t1_chunk);
   let t_enter = max(max(tmin_chunk.x, tmin_chunk.y), tmin_chunk.z);
@@ -165,8 +162,12 @@ fn traverseSVDAG(
     return hit;
   }
   
-  // t_start for octree traversal (already in correct LOCAL space)
+  // t_start is where ray enters chunk
   let t_start = max(t_enter, 0.0);
+  
+  // DON'T convert to local - keep everything in world space!
+  // (Nodes will be offset by chunk.world_offset)
+  let world_origin = ray_origin;
   
   // Get root index and node count for this chunk
   let root_idx = select(chunk.material_root, chunk.opaque_root, useOpaque);
@@ -184,13 +185,15 @@ fn traverseSVDAG(
   
   let world_size = chunk.chunk_size;
   
-  // Initialize stack with root at CHUNK CENTER (not corner!)
-  let world_center = vec3<f32>(world_size * 0.5);
+  // Initialize stack with root at CHUNK CENTER in WORLD coordinates!
+  let chunk_local_center = vec3<f32>(world_size * 0.5);
+  let chunk_world_center = chunk.world_offset + chunk_local_center;
   stack[0].packed_idx_depth = packIdxDepth(root_idx, 0u);
-  stack[0].pos_xyz = world_center;  // CENTER-BASED like reference
+  stack[0].pos_xyz = chunk_world_center;  // WORLD coordinates!
   stack_size = 1;
   
   var step_count = 0u;
+  var current_t = t_start;  // Track our progress along the ray (starts at chunk entry)
   
   while (stack_size > 0 && step_count < u32(MAX_STEPS)) {
     step_count++;
@@ -206,19 +209,27 @@ fn traverseSVDAG(
     let node_size = world_size / f32(1u << depth);
     let node_half = node_size * 0.5;
     
-    // Calculate AABB from CENTER (like reference shader)
+    // Calculate AABB from CENTER in WORLD space (node_center is already in world coords)
     let node_min = node_center - vec3<f32>(node_half);
     let node_max = node_center + vec3<f32>(node_half);
-    let t0 = (node_min - local_origin) * inv_ray_dir;
-    let t1 = (node_max - local_origin) * inv_ray_dir;
+    let t0 = (node_min - world_origin) * inv_ray_dir;
+    let t1 = (node_max - world_origin) * inv_ray_dir;
     let tmin = min(t0, t1);
     let tmax = max(t0, t1);
     let t_near = max(max(tmin.x, tmin.y), tmin.z);
     let t_far = min(min(tmax.x, tmax.y), tmax.z);
-    let current_t = max(t_near, t_start);  // Don't go before ray entry!
     
-    // Skip if ray doesn't hit this node or node is before entry point
-    if (t_near > t_far || t_far < t_start || current_t >= maxDist) {
+    // Update current_t to where we enter this node, but never go backward!
+    // (Reference sets current_t = max(t_near, 0.0), but we need to also respect t_start)
+    current_t = max(max(t_near, 0.0), t_start);
+    
+    // Skip if ray doesn't hit this node
+    if (t_near > t_far) {
+      continue;
+    }
+    
+    // Skip if beyond max distance
+    if (current_t >= maxDist) {
       continue;
     }
     
@@ -226,20 +237,26 @@ fn traverseSVDAG(
     let node_tag = svdag_nodes[node_idx];
     let node_data1 = svdag_nodes[node_idx + 1u];
     
-    // Leaf node - use current_t directly (no re-computation!)
+    // Leaf node - we hit geometry!
     if (node_tag == 1u) {
       let leaf_idx = node_data1;
       let block_id = svdag_leaves[leaf_idx];
       
-      // Found geometry! Use current_t as hit distance
+      // Found geometry!
       hit.distance = current_t;
       hit.block_id = select(block_id, 1u, block_id == 0u); // If 0, use 1 as fallback
       
-      // Calculate normal from AABB entry face (EXACT match with reference shader)
-      let t_near_vec = min(t0, t1);  // We already computed this above
+      // Calculate normal from AABB entry face (RECALCULATE like reference shader line 436-439)
+      // Must recalculate because t0/t1 are loop variables that get overwritten
+      let leaf_min = node_center - vec3<f32>(node_half);
+      let leaf_max = node_center + vec3<f32>(node_half);
+      let t0_leaf = (leaf_min - world_origin) * inv_ray_dir;
+      let t1_leaf = (leaf_max - world_origin) * inv_ray_dir;
+      let t_near_vec = min(t0_leaf, t1_leaf);
       let t_entry = max(max(t_near_vec.x, t_near_vec.y), t_near_vec.z);
       
-      let epsilon = 0.001;
+      // Determine which face we hit (with adaptive epsilon for precision)
+      let epsilon = max(0.001, abs(t_entry) * 0.00001);
       if (abs(t_entry - t_near_vec.x) < epsilon) {
         hit.normal = vec3<f32>(-sign(ray_dir.x), 0.0, 0.0);
       } else if (abs(t_entry - t_near_vec.y) < epsilon) {
@@ -256,31 +273,38 @@ fn traverseSVDAG(
     let child_size = node_size * 0.5;
     let child_half = child_size * 0.5;
     
-    // DDA traversal of children
+    // DDA ordering: traverse children front-to-back (CRITICAL for correctness!)
+    let ray_sign_x = u32(ray_dir.x >= 0.0);
+    let ray_sign_y = u32(ray_dir.y >= 0.0);
+    let ray_sign_z = u32(ray_dir.z >= 0.0);
+    
     for (var i = 0u; i < 8u; i++) {
-      if ((child_mask & (1u << i)) != 0u) {
-        let cx = f32(i & 1u);
-        let cy = f32((i >> 1u) & 1u);
-        let cz = f32((i >> 2u) & 1u);
+      // XOR with ray signs to get front-to-back order (match reference line 469)
+      let octant = i ^ (ray_sign_x | (ray_sign_y << 1u) | (ray_sign_z << 2u));
+      
+      if ((child_mask & (1u << octant)) != 0u) {
+        let cx = f32(octant & 1u);
+        let cy = f32((octant >> 1u) & 1u);
+        let cz = f32((octant >> 2u) & 1u);
         
-        // Calculate child CENTER (not corner!)
+        // Calculate child CENTER in WORLD space (node_center is already world coords)
         let child_offset = vec3<f32>(cx - 0.5, cy - 0.5, cz - 0.5) * child_size;
         let child_center = node_center + child_offset;
         
-        // Ray-AABB intersection test from CENTER
+        // Ray-AABB intersection test in WORLD space
         let child_min = child_center - vec3<f32>(child_half);
         let child_max = child_center + vec3<f32>(child_half);
-        let t0 = (child_min - local_origin) * inv_ray_dir;
-        let t1 = (child_max - local_origin) * inv_ray_dir;
+        let t0 = (child_min - world_origin) * inv_ray_dir;
+        let t1 = (child_max - world_origin) * inv_ray_dir;
         let tmin_vec = min(t0, t1);
         let tmax_vec = max(t0, t1);
         let t_near = max(max(tmin_vec.x, tmin_vec.y), tmin_vec.z);
         let t_far = min(min(tmax_vec.x, tmax_vec.y), tmax_vec.z);
         
-        // Only traverse if child is on or after ray entry point
-        if (t_near <= t_far && t_far >= t_start) {
-          // Count how many children come before this one in the mask
-          let child_count = countOneBits(child_mask & ((1u << i) - 1u));
+        // Only traverse if child is hit AND extends past current position (match reference line 495)
+        if (t_near <= t_far && t_far >= current_t) {
+          // Count how many children come before this octant in the mask
+          let child_count = countOneBits(child_mask & ((1u << octant) - 1u));
           // Child indices start at node_idx + 2
           let child_idx = svdag_nodes[node_idx + 2u + child_count];
           
@@ -362,12 +386,11 @@ fn shade(hit: Hit, ray_dir: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(r, g, b);
   }
   
-  // Debug mode 3: Normals (ignore block_id - show ANY hit)
+  // Debug mode 3: Normals
   if (renderParams.debug_mode == 3u) {
     if (hit.distance < 0.0) {
       return vec3<f32>(0.0, 0.0, 0.0);
     }
-    // Show normals even if block_id is 0
     return hit.normal * 0.5 + 0.5; // Map -1..1 to 0..1
   }
   
