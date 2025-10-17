@@ -76,9 +76,90 @@ fn unpackDepth(packed: u32) -> u32 {
 @group(0) @binding(4) var<storage, read> svdag_leaves: array<u32>;
 @group(0) @binding(5) var outputTexture: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(6) var<storage, read> materials: array<BlockMaterial>;
+@group(0) @binding(7) var<storage, read_write> chunkRequests: array<atomic<u32>>;
 
 const MAX_STACK_DEPTH = 19;
 const MAX_STEPS = 256;
+
+// ============================================================================
+// CHUNK SPACE CONVERSIONS & DDA
+// ============================================================================
+
+fn worldToChunk(worldPos: vec3<f32>) -> vec3<i32> {
+  // Convert world position to chunk coordinates
+  return vec3<i32>(
+    i32(floor(worldPos.x / 32.0)),
+    i32(floor(worldPos.y / 32.0)),
+    i32(floor(worldPos.z / 32.0))
+  );
+}
+
+fn chunkToRequestIndex(chunkCoord: vec3<i32>, cameraChunk: vec3<i32>, gridSize: i32) -> u32 {
+  // Convert chunk coordinate to index in request buffer
+  let halfGrid = gridSize / 2;
+  let rel = chunkCoord - cameraChunk;
+  
+  // Out of bounds?
+  if (abs(rel.x) > halfGrid || abs(rel.y) > halfGrid || abs(rel.z) > halfGrid) {
+    return 0xFFFFFFFFu;
+  }
+  
+  // Convert to grid coordinates [0, gridSize)
+  let gx = rel.x + halfGrid;
+  let gy = rel.y + halfGrid;
+  let gz = rel.z + halfGrid;
+  
+  return u32(gx + gy * gridSize + gz * gridSize * gridSize);
+}
+
+struct DDAState {
+  current_chunk: vec3<i32>,
+  t_max: vec3<f32>,
+  t_delta: vec3<f32>,
+  step: vec3<i32>,
+}
+
+fn initDDA(ray_origin: vec3<f32>, ray_dir: vec3<f32>) -> DDAState {
+  var state: DDAState;
+  
+  state.current_chunk = worldToChunk(ray_origin);
+  
+  state.step = vec3<i32>(
+    select(-1, 1, ray_dir.x > 0.0),
+    select(-1, 1, ray_dir.y > 0.0),
+    select(-1, 1, ray_dir.z > 0.0)
+  );
+  
+  state.t_delta = vec3<f32>(
+    32.0 / abs(ray_dir.x),
+    32.0 / abs(ray_dir.y),
+    32.0 / abs(ray_dir.z)
+  );
+  
+  let chunk_min = vec3<f32>(state.current_chunk) * 32.0;
+  let chunk_max = chunk_min + vec3<f32>(32.0);
+  
+  state.t_max = vec3<f32>(
+    select((chunk_min.x - ray_origin.x) / ray_dir.x, (chunk_max.x - ray_origin.x) / ray_dir.x, ray_dir.x > 0.0),
+    select((chunk_min.y - ray_origin.y) / ray_dir.y, (chunk_max.y - ray_origin.y) / ray_dir.y, ray_dir.y > 0.0),
+    select((chunk_min.z - ray_origin.z) / ray_dir.z, (chunk_max.z - ray_origin.z) / ray_dir.z, ray_dir.z > 0.0)
+  );
+  
+  return state;
+}
+
+fn stepDDA(state: ptr<function, DDAState>) {
+  if ((*state).t_max.x < (*state).t_max.y && (*state).t_max.x < (*state).t_max.z) {
+    (*state).current_chunk.x += (*state).step.x;
+    (*state).t_max.x += (*state).t_delta.x;
+  } else if ((*state).t_max.y < (*state).t_max.z) {
+    (*state).current_chunk.y += (*state).step.y;
+    (*state).t_max.y += (*state).t_delta.y;
+  } else {
+    (*state).current_chunk.z += (*state).step.z;
+    (*state).t_max.z += (*state).t_delta.z;
+  }
+}
 
 // ============================================================================
 // CHUNK MANAGEMENT
@@ -98,6 +179,22 @@ fn getChunkIndex(worldPos: vec3<f32>) -> i32 {
   }
   
   return -1; // No chunk at this position
+}
+
+fn getChunkIndexByCoord(chunkCoord: vec3<i32>) -> i32 {
+  // Find chunk by its chunk coordinates
+  for (var i = 0u; i < renderParams.max_chunks; i++) {
+    let chunk = chunkMetadata[i];
+    let cx = i32(chunk.world_offset.x / 32.0);
+    let cy = i32(chunk.world_offset.y / 32.0);
+    let cz = i32(chunk.world_offset.z / 32.0);
+    
+    if (cx == chunkCoord.x && cy == chunkCoord.y && cz == chunkCoord.z) {
+      return i32(i);
+    }
+  }
+  
+  return -1; // Chunk not loaded
 }
 
 fn worldToChunkLocal(worldPos: vec3<f32>, chunkIdx: i32) -> vec3<f32> {
@@ -333,18 +430,51 @@ fn raymarchChunks(ray_origin: vec3<f32>, ray_dir: vec3<f32>) -> Hit {
   closest_hit.steps = 0u;
   
   let max_dist = 200.0;
-  var min_distance = max_dist;
+  let camera_chunk = worldToChunk(camera.position);
   
-  // Check ALL loaded chunks, find closest hit
-  for (var i = 0u; i < renderParams.max_chunks; i++) {
-    let chunk_hit = traverseSVDAG(ray_origin, ray_dir, i32(i), false, min_distance);
+  // Initialize DDA
+  var dda = initDDA(ray_origin, ray_dir);
+  var steps = 0;
+  let max_steps = 100;
+  
+  // March through chunk grid using DDA
+  while (steps < max_steps) {
+    steps += 1;
     
-    if (chunk_hit.distance >= 0.0 && chunk_hit.distance < min_distance) {
-      closest_hit = chunk_hit;
-      min_distance = chunk_hit.distance;
+    // Check if ray has traveled too far
+    let t_current = min(min(dda.t_max.x, dda.t_max.y), dda.t_max.z);
+    if (t_current > max_dist) {
+      break;
     }
+    
+    // Try to find this chunk
+    let chunkIdx = getChunkIndexByCoord(dda.current_chunk);
+    
+    if (chunkIdx == -1) {
+      // CHUNK NOT LOADED - Request it!
+      let requestIdx = chunkToRequestIndex(dda.current_chunk, camera_chunk, 33);
+      if (requestIdx != 0xFFFFFFFFu) {
+        atomicAdd(&chunkRequests[requestIdx], 1u);
+      }
+      
+      // Return miss (sky color) - hole this frame
+      closest_hit.distance = t_current;
+      return closest_hit;
+    }
+    
+    // Chunk is loaded - traverse its SVDAG
+    let chunk_hit = traverseSVDAG(ray_origin, ray_dir, chunkIdx, false, max_dist);
+    
+    if (chunk_hit.distance >= 0.0 && chunk_hit.distance < max_dist) {
+      // Found a voxel!
+      return chunk_hit;
+    }
+    
+    // Chunk was air or ray exited - step to next chunk
+    stepDDA(&dda);
   }
   
+  // No hit
   return closest_hit;
 }
 

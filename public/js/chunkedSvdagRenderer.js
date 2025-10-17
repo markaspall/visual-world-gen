@@ -30,10 +30,12 @@ export class ChunkedSvdagRenderer {
     this.scanReuseDistance = 32;  // Reuse scan if camera moved less than this
     this.lastScanFrame = 0;
     
-    // Chunk miss tracking (raymarcher requests missing chunks)
-    this.chunkMissBuffer = null;
-    this.chunkMissStaging = null;
-    this.maxChunkRequests = 100;  // Track up to 100 missed chunks per frame
+    // Request-on-miss system
+    this.chunkRequestBuffer = null;
+    this.chunkRequestStaging = null;
+    this.viewDistanceChunks = 16;
+    this.gridSize = this.viewDistanceChunks * 2 + 1;  // 33
+    this.requestBufferSize = this.gridSize ** 3;  // 35,937
     
     // Camera (DEBUG: Center of test chunk 0,4,0 at world [0-32, 128-160, 0-32])
     this.camera = {
@@ -158,6 +160,26 @@ export class ChunkedSvdagRenderer {
     });
     this.device.queue.writeBuffer(this.materialsBuffer, 0, materialsData);
     
+    // Create request buffer (GPU read/write)
+    this.chunkRequestBuffer = this.device.createBuffer({
+      label: 'Chunk Request Buffer',
+      size: this.requestBufferSize * 4,  // 35,937 * 4 bytes = 144KB
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
+    });
+    
+    // Create staging buffer (CPU read)
+    this.chunkRequestStaging = this.device.createBuffer({
+      label: 'Chunk Request Staging',
+      size: this.requestBufferSize * 4,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+    });
+    
+    // Initialize to zero
+    const clearData = new Uint32Array(this.requestBufferSize);
+    this.device.queue.writeBuffer(this.chunkRequestBuffer, 0, clearData);
+    
+    console.log(`📊 Request buffer initialized: ${this.requestBufferSize} slots (${(this.requestBufferSize * 4 / 1024).toFixed(1)}KB)`);
+    
     // Create placeholder buffers (will be updated when chunks load)
     this.chunkMetadataBuffer = this.device.createBuffer({
       size: 1024 * 32, // 100 chunks max
@@ -192,7 +214,8 @@ export class ChunkedSvdagRenderer {
         { binding: 3, resource: { buffer: this.svdagNodesBuffer } },
         { binding: 4, resource: { buffer: this.svdagLeavesBuffer } },
         { binding: 5, resource: this.computeTexture.createView() },
-        { binding: 6, resource: { buffer: this.materialsBuffer } }
+        { binding: 6, resource: { buffer: this.materialsBuffer } },
+        { binding: 7, resource: { buffer: this.chunkRequestBuffer } }
       ]
     });
     
