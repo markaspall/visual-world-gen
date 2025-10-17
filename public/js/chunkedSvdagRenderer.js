@@ -4,6 +4,7 @@
  */
 
 import { ChunkManager } from './chunkManager.js';
+import { VisibilityScanner } from './visibilityScanner.js';
 
 export class ChunkedSvdagRenderer {
   constructor(canvas, worldId) {
@@ -17,6 +18,22 @@ export class ChunkedSvdagRenderer {
     
     // Chunk management
     this.chunkManager = null;
+    this.visibilityScanner = null;
+    
+    // Frame counter for chunk update throttling
+    this.frameCount = 0;
+    this.chunkUpdateInterval = 5;  // Update chunks every 5 frames (~83ms at 60fps)
+    
+    // Scan result caching
+    this.lastScanResults = null;
+    this.lastScanPosition = [0, 0, 0];
+    this.scanReuseDistance = 32;  // Reuse scan if camera moved less than this
+    this.lastScanFrame = 0;
+    
+    // Chunk miss tracking (raymarcher requests missing chunks)
+    this.chunkMissBuffer = null;
+    this.chunkMissStaging = null;
+    this.maxChunkRequests = 100;  // Track up to 100 missed chunks per frame
     
     // Camera (DEBUG: Center of test chunk 0,4,0 at world [0-32, 128-160, 0-32])
     this.camera = {
@@ -92,6 +109,10 @@ export class ChunkedSvdagRenderer {
     
     // Create chunk manager
     this.chunkManager = new ChunkManager(this.worldId, this.device);
+    
+    // Create visibility scanner
+    this.visibilityScanner = new VisibilityScanner(this.device, this.camera, 32);
+    await this.visibilityScanner.init();
     
     // Load shader
     const shaderCode = await fetch('/shaders/raymarcher_svdag_chunked.wgsl').then(r => r.text());
@@ -246,12 +267,66 @@ export class ChunkedSvdagRenderer {
   }
 
   async updateChunks() {
-    // Load chunks around camera
-    await this.chunkManager.loadChunksAround(
-      this.camera.position[0],
-      this.camera.position[1],
-      this.camera.position[2]
-    );
+    const startTime = performance.now();
+    
+    // Check if we can reuse cached scan results
+    const cameraMoved = this.getCameraDistance(this.lastScanPosition, this.camera.position);
+    const framesSinceLastScan = this.frameCount - this.lastScanFrame;
+    const canReuseScan = this.lastScanResults && 
+                          cameraMoved < this.scanReuseDistance && 
+                          framesSinceLastScan < 30;  // Max 30 frames (0.5s at 60fps)
+    
+    let neededChunks;
+    
+    if (canReuseScan) {
+      // Reuse cached scan + add predictive chunks
+      console.log(`♻️ Reusing scan from ${framesSinceLastScan} frames ago (moved ${cameraMoved.toFixed(1)}m)`);
+      neededChunks = this.lastScanResults;
+      
+      // Add predictive chunks (look ahead in movement direction)
+      const predictiveChunks = this.getPredictiveChunks();
+      neededChunks = [...neededChunks, ...predictiveChunks];
+    } else {
+      // Phase 1: Visibility scan - detect which chunks rays need
+      neededChunks = await this.visibilityScanner.scan(
+        this.cameraBuffer,
+        512  // max distance (16 chunks × 32) - increased for memory savings!
+      );
+      
+      console.log(`📡 Visibility scan detected ${neededChunks.length} chunks (${(performance.now() - startTime).toFixed(1)}ms)`);
+      
+      // Cache results
+      this.lastScanResults = neededChunks;
+      this.lastScanPosition = [...this.camera.position];
+      this.lastScanFrame = this.frameCount;
+    }
+    
+    // Phase 2: Check for chunks requested by raymarcher (on-miss requests)
+    const missedChunks = this.getMissedChunkRequests();
+    if (missedChunks.length > 0) {
+      console.log(`🎯 Raymarcher requested ${missedChunks.length} missing chunks`);
+      neededChunks = [...neededChunks, ...missedChunks];
+    }
+    
+    // Phase 3: Load detected chunks (up to 100 chunks)
+    const maxChunksToLoad = 100;
+    const chunksToLoad = neededChunks.slice(0, maxChunksToLoad);
+    
+    const loadStartTime = performance.now();
+    const maxParallel = 8;
+    for (let i = 0; i < chunksToLoad.length; i += maxParallel) {
+      const batch = chunksToLoad.slice(i, i + maxParallel);
+      await Promise.all(batch.map(c => 
+        this.chunkManager.loadChunk(c.cx, c.cy, c.cz)
+      ));
+    }
+    
+    const loadTime = performance.now() - loadStartTime;
+    console.log(`📦 Loaded ${chunksToLoad.length} chunks (${loadTime.toFixed(1)}ms, ${(loadTime/chunksToLoad.length).toFixed(1)}ms per chunk)`);
+    
+    // Phase 3: Evict non-visible chunks
+    this.evictNonVisibleChunks(neededChunks);
+    console.log(`📊 Total chunks in memory: ${this.chunkManager.chunks.size}`);
     
     // Upload chunk data to GPU
     const chunks = this.chunkManager.getLoadedChunks();
@@ -319,6 +394,115 @@ export class ChunkedSvdagRenderer {
     ]);
     this.device.queue.writeBuffer(this.renderParamsBuffer, 0, renderParams);
   }
+  
+  evictNonVisibleChunks(visibleChunks) {
+    const visibleSet = new Set(
+      visibleChunks.map(c => this.chunkManager.getChunkKey(c.cx, c.cy, c.cz))
+    );
+    
+    const toEvict = [];
+    for (const [key, chunk] of this.chunkManager.chunks.entries()) {
+      if (!visibleSet.has(key)) {
+        // Track frames not visible
+        chunk.framesHidden = (chunk.framesHidden || 0) + 1;
+        
+        // Evict if hidden for 60+ frames (1 second at 60fps)
+        if (chunk.framesHidden > 60) {
+          toEvict.push(key);
+        }
+      } else {
+        chunk.framesHidden = 0;  // Reset counter
+      }
+    }
+    
+    for (const key of toEvict) {
+      this.chunkManager.chunks.delete(key);
+    }
+    
+    if (toEvict.length > 0) {
+      console.log(`🗑️ Evicted ${toEvict.length} non-visible chunks`);
+    }
+  }
+  
+  getMissedChunkRequests() {
+    // Track which chunks were accessed but missing during last frame
+    // This happens when raymarchChunks calls getChunkIndex and gets -1
+    
+    if (!this.missedChunksLastFrame) {
+      this.missedChunksLastFrame = new Set();
+      return [];
+    }
+    
+    const requests = [];
+    for (const key of this.missedChunksLastFrame) {
+      const [cx, cy, cz] = key.split(',').map(Number);
+      requests.push({ cx, cy, cz, rayCount: 1 });
+    }
+    
+    // Clear for next frame
+    this.missedChunksLastFrame = new Set();
+    
+    return requests;
+  }
+  
+  recordMissedChunk(worldX, worldY, worldZ) {
+    // Called when raymarcher needs a chunk that isn't loaded
+    if (!this.missedChunksLastFrame) {
+      this.missedChunksLastFrame = new Set();
+    }
+    
+    const chunk = this.chunkManager.worldToChunk(worldX, worldY, worldZ);
+    const key = `${chunk.cx},${chunk.cy},${chunk.cz}`;
+    this.missedChunksLastFrame.add(key);
+  }
+  
+  getPredictiveChunks() {
+    // Look ahead in movement direction
+    if (!this.lastScanPosition) return [];
+    
+    const dx = this.camera.position[0] - this.lastScanPosition[0];
+    const dy = this.camera.position[1] - this.lastScanPosition[1];
+    const dz = this.camera.position[2] - this.lastScanPosition[2];
+    const speed = Math.sqrt(dx*dx + dy*dy + dz*dz);
+    
+    if (speed < 1.0) return [];  // Not moving much
+    
+    // Predict position 1 second ahead
+    const predictDistance = speed * 60;  // 60 frames ahead
+    const predictPos = [
+      this.camera.position[0] + (dx / speed) * predictDistance,
+      this.camera.position[1] + (dy / speed) * predictDistance,
+      this.camera.position[2] + (dz / speed) * predictDistance
+    ];
+    
+    // Get chunks around predicted position
+    const predictChunk = this.chunkManager.worldToChunk(
+      predictPos[0], predictPos[1], predictPos[2]
+    );
+    
+    const predictiveChunks = [];
+    for (let dx = -2; dx <= 2; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dz = -2; dz <= 2; dz++) {
+          predictiveChunks.push({
+            cx: predictChunk.cx + dx,
+            cy: predictChunk.cy + dy,
+            cz: predictChunk.cz + dz,
+            rayCount: 0
+          });
+        }
+      }
+    }
+    
+    return predictiveChunks;
+  }
+  
+  getCameraDistance(pos1, pos2) {
+    const dx = pos1[0] - pos2[0];
+    const dy = pos1[1] - pos2[1];
+    const dz = pos1[2] - pos2[2];
+    return Math.sqrt(dx*dx + dy*dy + dz*dz);
+  }
 
   async render() {
     // Update time
@@ -326,6 +510,12 @@ export class ChunkedSvdagRenderer {
     const dt = (now - this.lastFrameTime) / 1000;
     this.lastFrameTime = now;
     this.time += dt;
+    
+    // Update chunks periodically (not every frame)
+    if (this.frameCount % this.chunkUpdateInterval === 0) {
+      await this.updateChunks();
+    }
+    this.frameCount++;
     
     // Update buffers
     this.updateCameraBuffer();
