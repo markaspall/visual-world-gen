@@ -37,10 +37,14 @@ struct BlockMaterial {
 // TimeParams removed - not used yet (can add back with fog/lighting later)
 
 struct RenderParams {
+  time: f32,
   max_chunks: u32,
   chunk_size: f32,
   max_depth: u32,
-  debug_mode: u32,  // 0=normal, 1=depth, 2=chunks, 3=normals, 4=steps, 5=dag activity
+  debug_mode: u32,  // 0=normal, 1=depth, 4=normals, 5=steps, 6=chunks, 7=memory, 8=dag
+  max_distance: f32,  // Adaptive: reduces under memory pressure
+  max_chunk_steps: u32,  // Adaptive: reduces under memory pressure
+  padding: u32,  // Align to 16 bytes
 }
 
 struct Hit {
@@ -49,7 +53,8 @@ struct Hit {
   distance: f32,
   transparent_distance: f32,
   chunk_index: i32,  // Which chunk we hit
-  steps: u32,  // How many steps to find this hit
+  steps: u32,  // SVDAG traversal steps within chunk
+  chunk_steps: u32,  // How many chunks ray traversed
 }
 
 struct StackEntry {
@@ -77,9 +82,12 @@ fn unpackDepth(packed: u32) -> u32 {
 @group(0) @binding(5) var outputTexture: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(6) var<storage, read> materials: array<BlockMaterial>;
 @group(0) @binding(7) var<storage, read_write> chunkRequests: array<atomic<u32>>;
+@group(0) @binding(8) var<storage, read> chunkHashTable: array<u32>;
 
 const MAX_STACK_DEPTH = 19;
 const MAX_STEPS = 256;
+const HASH_TABLE_SIZE = 8192u;  // 2x soft limit (3000 chunks * 2.7 = ~8k)
+const MAX_PROBE = 32u;  // Max linear probing steps
 
 // ============================================================================
 // CHUNK SPACE CONVERSIONS & DDA
@@ -181,20 +189,44 @@ fn getChunkIndex(worldPos: vec3<f32>) -> i32 {
   return -1; // No chunk at this position
 }
 
+// Spatial hash function for 3D coordinates
+fn chunkHash(coord: vec3<i32>) -> u32 {
+  // Large primes for good distribution
+  let p1 = 73856093u;
+  let p2 = 19349663u;
+  let p3 = 83492791u;
+  
+  let h = (u32(coord.x) * p1) ^ (u32(coord.y) * p2) ^ (u32(coord.z) * p3);
+  return h;
+}
+
 fn getChunkIndexByCoord(chunkCoord: vec3<i32>) -> i32 {
-  // Find chunk by its chunk coordinates
-  for (var i = 0u; i < renderParams.max_chunks; i++) {
-    let chunk = chunkMetadata[i];
-    let cx = i32(chunk.world_offset.x / 32.0);
-    let cy = i32(chunk.world_offset.y / 32.0);
-    let cz = i32(chunk.world_offset.z / 32.0);
+  // Hash table lookup with linear probing
+  let hash = chunkHash(chunkCoord);
+  var slot = hash % HASH_TABLE_SIZE;
+  
+  for (var probe = 0u; probe < MAX_PROBE; probe++) {
+    let index = chunkHashTable[slot];
+    
+    if (index == 0xFFFFFFFFu) {
+      return -1;  // Empty slot = chunk not found
+    }
+    
+    // Check if this is the chunk we're looking for
+    let chunk = chunkMetadata[index];
+    let cx = i32(round(chunk.world_offset.x / 32.0));
+    let cy = i32(round(chunk.world_offset.y / 32.0));
+    let cz = i32(round(chunk.world_offset.z / 32.0));
     
     if (cx == chunkCoord.x && cy == chunkCoord.y && cz == chunkCoord.z) {
-      return i32(i);
+      return i32(index);  // Found it!
     }
+    
+    // Collision - try next slot (linear probing)
+    slot = (slot + 1u) % HASH_TABLE_SIZE;
   }
   
-  return -1; // Chunk not loaded
+  return -1;  // Not found after MAX_PROBE attempts
 }
 
 fn worldToChunkLocal(worldPos: vec3<f32>, chunkIdx: i32) -> vec3<f32> {
@@ -223,6 +255,7 @@ fn traverseSVDAG(
   hit.transparent_distance = 0.0;
   hit.chunk_index = chunkIdx;
   hit.steps = 0u;
+  hit.chunk_steps = 0u;
   
   if (chunkIdx < 0) {
     return hit;
@@ -428,28 +461,21 @@ fn raymarchChunks(ray_origin: vec3<f32>, ray_dir: vec3<f32>) -> Hit {
   closest_hit.block_id = 0u;
   closest_hit.chunk_index = -1;
   closest_hit.steps = 0u;
+  closest_hit.chunk_steps = 0u;
   
-  // Adaptive view distance based on loaded chunk count
-  // If memory is tight, reduce distance to prevent thrashing
-  let chunks_loaded = f32(renderParams.max_chunks);
-  var max_dist = 800.0;  // Default: 25 chunks
-  
-  if (chunks_loaded > 380.0) {
-    max_dist = 320.0;  // Reduce to 10 chunks when near limit
-  } else if (chunks_loaded > 300.0) {
-    max_dist = 480.0;  // Reduce to 15 chunks
-  }
+  // Adaptive limits based on memory pressure
+  let max_dist = renderParams.max_distance;
+  let max_steps = renderParams.max_chunk_steps;
   
   let camera_chunk = worldToChunk(camera.position);
   
   // Initialize DDA
   var dda = initDDA(ray_origin, ray_dir);
-  var steps = 0;
-  let max_steps = 150;  // Increased for longer distances
+  var steps = 0u;  // u32 to match Hit.chunk_steps
   
   // March through chunk grid using DDA
   while (steps < max_steps) {
-    steps += 1;
+    steps++;
     
     // Check if ray has traveled too far
     let t_current = min(min(dda.t_max.x, dda.t_max.y), dda.t_max.z);
@@ -469,22 +495,25 @@ fn raymarchChunks(ray_origin: vec3<f32>, ray_dir: vec3<f32>) -> Hit {
       
       // Return miss (sky color) - hole this frame
       closest_hit.distance = t_current;
+      closest_hit.chunk_steps = steps;  // Track how many chunks we stepped through
       return closest_hit;
     }
     
     // Chunk is loaded - traverse its SVDAG
-    let chunk_hit = traverseSVDAG(ray_origin, ray_dir, chunkIdx, false, max_dist);
+    var chunk_hit = traverseSVDAG(ray_origin, ray_dir, chunkIdx, false, max_dist);
     
     if (chunk_hit.distance >= 0.0 && chunk_hit.distance < max_dist) {
       // Found a voxel!
+      chunk_hit.chunk_steps = steps;  // Track how many chunks we stepped through
       return chunk_hit;
     }
     
-    // Chunk was air or ray exited - step to next chunk
+    // Chunk was air - continue to next chunk
     stepDDA(&dda);
   }
   
-  // No hit
+  // No hit - return with chunk step count
+  closest_hit.chunk_steps = steps;
   return closest_hit;
 }
 
@@ -506,38 +535,18 @@ fn shade(hit: Hit, ray_dir: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(r, g, b);
   }
   
-  // Debug mode 2: Chunk boundaries
-  if (renderParams.debug_mode == 2u) {
-    if (hit.distance < 0.0) {
-      return vec3<f32>(0.1, 0.1, 0.1); // Dark gray = miss
-    }
-    // Get chunk world position for unique color
-    let chunk = chunkMetadata[u32(hit.chunk_index)];
-    let cx = i32(chunk.world_offset.x / 32.0);
-    let cy = i32(chunk.world_offset.y / 32.0);
-    let cz = i32(chunk.world_offset.z / 32.0);
-    
-    // Hash chunk coords to get unique color per chunk
-    let hash = (cx * 73856093) ^ (cy * 19349663) ^ (cz * 83492791);
-    let r = f32((hash & 0xFF)) / 255.0;
-    let g = f32(((hash >> 8) & 0xFF)) / 255.0;
-    let b = f32(((hash >> 16) & 0xFF)) / 255.0;
-    
-    return vec3<f32>(r, g, b);
-  }
-  
-  // Debug mode 3: Normals
-  if (renderParams.debug_mode == 3u) {
+  // Debug mode 4: Normals
+  if (renderParams.debug_mode == 4u) {
     if (hit.distance < 0.0) {
       return vec3<f32>(0.0, 0.0, 0.0);
     }
     return hit.normal * 0.5 + 0.5; // Map -1..1 to 0..1
   }
   
-  // Debug mode 4: Step count heatmap
-  if (renderParams.debug_mode == 4u) {
-    let steps_normalized = clamp(f32(hit.steps) / 100.0, 0.0, 1.0);
-    // Blue (cold/few steps) -> Green -> Yellow -> Red (hot/many steps)
+  // Debug mode 5: Chunk step count heatmap (how many chunks ray traversed)
+  if (renderParams.debug_mode == 5u) {
+    let steps_normalized = clamp(f32(hit.chunk_steps) / 64.0, 0.0, 1.0);
+    // Blue (cold/few chunks) -> Green -> Yellow -> Red (hot/many chunks)
     var color = vec3<f32>(0.0);
     if (steps_normalized < 0.25) {
       // Blue to cyan
@@ -559,8 +568,42 @@ fn shade(hit: Hit, ray_dir: vec3<f32>) -> vec3<f32> {
     return color;
   }
   
-  // Debug mode 5: DAG activity (shows where DAG traversal is happening)
-  if (renderParams.debug_mode == 5u) {
+  // Debug mode 6: Chunk boundaries
+  if (renderParams.debug_mode == 6u) {
+    if (hit.distance < 0.0) {
+      return vec3<f32>(0.1, 0.1, 0.1); // Dark gray = miss
+    }
+    // Get chunk world position for unique color
+    let chunk = chunkMetadata[u32(hit.chunk_index)];
+    let cx = i32(chunk.world_offset.x / 32.0);
+    let cy = i32(chunk.world_offset.y / 32.0);
+    let cz = i32(chunk.world_offset.z / 32.0);
+    
+    // Hash chunk coords to get unique color per chunk
+    let hash = (cx * 73856093) ^ (cy * 19349663) ^ (cz * 83492791);
+    let r = f32((hash & 0xFF)) / 255.0;
+    let g = f32(((hash >> 8) & 0xFF)) / 255.0;
+    let b = f32(((hash >> 16) & 0xFF)) / 255.0;
+    
+    return vec3<f32>(r, g, b);
+  }
+  
+  // Debug mode 7: Memory pressure heatmap
+  if (renderParams.debug_mode == 7u) {
+    let memory_pressure = f32(renderParams.max_chunks) / 600.0;
+    // Green = low, Yellow = medium, Red = high memory usage
+    var color = vec3<f32>(0.0);
+    if (memory_pressure < 0.5) {
+      color = mix(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 1.0, 0.0), memory_pressure * 2.0);
+    } else {
+      color = mix(vec3<f32>(1.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), (memory_pressure - 0.5) * 2.0);
+    }
+    // Show chunks loaded as text overlay would be nice, but just use solid color
+    return color;
+  }
+  
+  // Debug mode 8: DAG activity (shows where DAG traversal is happening)
+  if (renderParams.debug_mode == 8u) {
     if (hit.steps == 0u) {
       return vec3<f32>(0.0, 0.0, 0.0); // Black = no work
     }

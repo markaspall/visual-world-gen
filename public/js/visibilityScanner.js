@@ -170,6 +170,13 @@ export class VisibilityScanner {
         const cy = y - this.viewDistanceChunks + cameraChunk.cy;
         const cz = z - this.viewDistanceChunks + cameraChunk.cz;
         
+        // CRITICAL FIX: Only load chunks within ±2 Y levels of camera
+        // This prevents the 600-chunk budget from being diluted across 33 vertical levels!
+        const yDelta = Math.abs(cy - cameraChunk.cy);
+        if (yDelta > 2) {
+          continue;  // Skip chunks more than 2 Y levels away
+        }
+        
         requestedChunks.push({
           cx, cy, cz,
           rayCount: requestData[i]  // How many rays hit this chunk

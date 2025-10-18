@@ -15,13 +15,23 @@ export class ChunkManager {
     this.loadQueue = [];
     this.loading = new Set();
     
-    // Configuration
-    this.maxCachedChunks = 400; // Increased for request-on-miss system (Stage 4 will add smart eviction)
+    // Cache limits  
+    this.maxCachedChunks = 5000;  // Large budget for now - meta-SVDAG will optimize later (Stage 7)
     this.chunkSize = 32; // 32x32x32 voxels
     this.loadRadius = 2; // Load chunks within 2 chunk radius (5x5x5 = 125 chunks)
     
     // Camera position for distance-based eviction
     this.cameraPosition = [0, 0, 0];
+    
+    // Adaptive eviction thresholds (for a game, not a map!)
+    this.evictionThresholds = [
+      60000,   // 1 minute (normal operation)
+      30000,   // 30 seconds (getting full)
+      15000,   // 15 seconds (very full)
+      10000,   // 10 seconds (critical)
+      5000     // 5 seconds (emergency)
+    ];
+    this.currentThresholdIndex = 0; // Start with 1 minute
     
     // Statistics
     this.stats = {
@@ -203,12 +213,14 @@ export class ChunkManager {
       const chunkData = await this.fetchChunk(cx, cy, cz);
       
       if (chunkData) {
-        // Add to cache with timestamp
-        this.chunks.set(key, { 
+        // Add to cache with timestamps
+        const now = Date.now();
+        // Store chunk data (even if empty - shader needs to know it exists)
+        this.chunks.set(key, {
           cx, cy, cz, 
           ...chunkData,
-          loadedFrame: Date.now(),  // Track when loaded
-          lastAccessFrame: Date.now()  // Track last access
+          loadedFrame: now,      // Track when loaded
+          lastSeenFrame: now     // Track when last seen by rays
         });
         this.stats.chunksLoaded++;
         
@@ -292,60 +304,132 @@ export class ChunkManager {
   }
   
   /**
-   * Evict oldest chunks to free memory
+   * Evict chunks using hybrid strategy:
+   * 1. Always evict chunks not seen for 10 minutes (stale data)
+   * 2. Primary: Distance-based eviction (far chunks)
+   * 3. Secondary: Under pressure (>80%), consider LRU within distance bands
    */
   evictOldChunks(cameraPos = null) {
-    const toRemove = this.chunks.size - this.maxCachedChunks + 10; // Remove 10 extra for headroom
-    if (toRemove <= 0) return;
+    if (!cameraPos) {
+      console.warn('⚠️ No camera position for eviction!');
+      return;
+    }
     
-    // NEW: Distance-first eviction (distance >> age)
-    if (cameraPos) {
-      const camChunk = this.worldToChunk(cameraPos[0], cameraPos[1], cameraPos[2]);
-      const now = Date.now();
-      const protectRadius = 3; // Only protect chunks within 3 chunk radius
-      const minAge = 1000; // 1 second minimum age (reduced)
-      
-      // Score chunks by distance from camera
-      const scored = Array.from(this.chunks.entries()).map(([key, chunk]) => {
-        const dx = chunk.cx - camChunk.cx;
-        const dy = chunk.cy - camChunk.cy;
-        const dz = chunk.cz - camChunk.cz;
-        const distSq = dx*dx + dy*dy + dz*dz;
-        const distance = Math.sqrt(distSq);
-        const age = now - (chunk.loadedFrame || 0);
-        
-        // Only protect nearby AND recent chunks
-        const isNearby = distance <= protectRadius;
-        const isRecent = age < minAge;
-        const isProtected = isNearby && isRecent;
-        
-        return { key, distSq, distance, age, isProtected };
-      });
-      
-      // Filter out protected, sort by distance (furthest first)
-      const evictable = scored.filter(s => !s.isProtected);
-      evictable.sort((a, b) => b.distSq - a.distSq);
-      
-      // Remove furthest chunks
-      const actualRemove = Math.min(toRemove, evictable.length);
-      for (let i = 0; i < actualRemove; i++) {
-        this.chunks.delete(evictable[i].key);
+    const now = Date.now();
+    const ANCIENT_TIME = 20 * 60 * 1000;  // 20 minutes - ALWAYS evict these
+    const STALE_TIME = 10 * 60 * 1000;     // 10 minutes - evict when under pressure
+    const PRESSURE_THRESHOLD = 0.8;
+    const EVICTION_START = 0.6;  // Start eviction at 60% full (3000/5000 chunks)
+    
+    // Phase 0: ALWAYS remove ancient chunks (not seen for 20+ minutes)
+    // This runs regardless of buffer pressure - safety valve
+    const ancientChunks = [];
+    for (const [key, chunk] of this.chunks.entries()) {
+      // Safety check: if lastSeenFrame is missing or invalid, set it to now
+      if (!chunk.lastSeenFrame || typeof chunk.lastSeenFrame !== 'number') {
+        chunk.lastSeenFrame = now;
+        continue;  // Don't evict chunks with fixed timestamps
       }
       
-      // Only log if significant eviction happened
-      if (actualRemove >= 10) {
-        const protectedCount = scored.length - evictable.length;
-        console.log(`🗑️ Evicted ${actualRemove} distant chunks (${this.chunks.size} remain${protectedCount > 0 ? `, ${protectedCount} protected nearby` : ''})`);
-      }
-    } else {
-      // Fallback: Remove oldest chunks (simple FIFO)
-      let removed = 0;
-      for (const key of this.chunks.keys()) {
-        this.chunks.delete(key);
-        removed++;
-        if (removed >= toRemove) break;
+      const age = now - chunk.lastSeenFrame;
+      if (age > ANCIENT_TIME) {
+        ancientChunks.push(key);
+        console.log(`  Ancient chunk ${key}: ${(age / 60000).toFixed(1)} minutes old`);
       }
     }
+    
+    for (const key of ancientChunks) {
+      this.chunks.delete(key);
+    }
+    
+    if (ancientChunks.length > 0) {
+      console.log(`🗑️ Evicted ${ancientChunks.length} ancient chunks (not seen for 20+ minutes)`);
+    }
+    
+    // Phase 1: Check if we should start evicting based on pressure
+    const softLimit = Math.floor(this.maxCachedChunks * EVICTION_START);
+    const toRemove = this.chunks.size - softLimit;
+    if (toRemove <= 0) {
+      return ancientChunks.length;  // Below soft limit, but return ancient count
+    }
+    
+    // Phase 2: We're over soft limit - check for stale chunks ONLY if at high capacity
+    const staleChunks = [];
+    
+    if (this.chunks.size > this.maxCachedChunks * 0.9) {  // Only when 90%+ full
+      for (const [key, chunk] of this.chunks.entries()) {
+        if (now - chunk.lastSeenFrame > STALE_TIME) {
+          staleChunks.push(key);
+        }
+      }
+      
+      for (const key of staleChunks) {
+        this.chunks.delete(key);
+      }
+      
+      if (staleChunks.length > 0) {
+        console.log(`🗑️ Evicted ${staleChunks.length} stale chunks (not seen for 10+ minutes)`);
+      }
+    }
+    
+    // Phase 3: Check if stale eviction was enough
+    const stillToRemove = this.chunks.size - this.maxCachedChunks;
+    if (stillToRemove <= 0) {
+      return staleChunks.length;  // Stale eviction was enough
+    }
+    
+    // Don't evict too aggressively - max 50 chunks per frame
+    const actualTarget = Math.min(toRemove, 50);
+    const pressure = this.getMemoryPressure();
+    const highPressure = pressure > PRESSURE_THRESHOLD;
+    
+    const camChunk = this.worldToChunk(cameraPos[0], cameraPos[1], cameraPos[2]);
+    
+    // Score all chunks
+    const scored = Array.from(this.chunks.entries()).map(([key, chunk]) => {
+      const dx = chunk.cx - camChunk.cx;
+      const dy = chunk.cy - camChunk.cy;
+      const dz = chunk.cz - camChunk.cz;
+      const distSq = dx*dx + dy*dy + dz*dz;
+      const distance = Math.sqrt(distSq);
+      
+      // Hybrid scoring:
+      // - Primary: Distance (always matters)
+      // - Secondary: Last seen time (only under pressure)
+      let score = distSq * 1000;  // Distance is primary factor
+      
+      if (highPressure) {
+        // Under pressure: Also consider how recently chunk was seen
+        const timeSinceView = now - chunk.lastSeenFrame;
+        const ageBonus = timeSinceView / 1000;  // Bonus points for old chunks
+        score += ageBonus * 100;  // Weight: distance matters 10x more than age
+      }
+      
+      return { key, distance, score, lastSeen: (now - chunk.lastSeenFrame) / 1000 };
+    });
+    
+    // Sort by score (highest = worst = evict first)
+    scored.sort((a, b) => b.score - a.score);
+    
+    // Remove worst chunks
+    const removed = [];
+    for (let i = 0; i < actualTarget; i++) {
+      this.chunks.delete(scored[i].key);
+      removed.push({
+        dist: scored[i].distance.toFixed(1),
+        age: scored[i].lastSeen.toFixed(1)
+      });
+    }
+    
+    // Log eviction
+    if (removed.length > 0) {
+      const strategy = highPressure ? 'distance+LRU' : 'distance';
+      const sample = removed.slice(0, 3).map(r => `${r.dist}ch/${r.age}s`).join(', ');
+      console.log(`🗑️ Evicted ${removed.length} chunks (${strategy}): ${sample} | ${this.chunks.size} remain`);
+    }
+    
+    // Return total evicted count (ancient + stale + distance-based)
+    return ancientChunks.length + staleChunks.length + removed.length;
   }
 
   /**
@@ -353,6 +437,20 @@ export class ChunkManager {
    */
   updateCameraPosition(x, y, z) {
     this.cameraPosition = [x, y, z];
+  }
+
+  /**
+   * Get memory pressure (0.0 = plenty of room, 1.0 = at limit)
+   */
+  getMemoryPressure() {
+    return Math.min(1.0, this.chunks.size / this.maxCachedChunks);
+  }
+
+  /**
+   * Get current eviction threshold in seconds
+   */
+  getCurrentEvictionThreshold() {
+    return this.evictionThresholds[this.currentThresholdIndex] / 1000;
   }
 
   /**
