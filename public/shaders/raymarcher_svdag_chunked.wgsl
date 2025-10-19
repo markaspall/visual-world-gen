@@ -15,12 +15,13 @@ struct Camera {
 }
 
 struct ChunkMetadata {
-  world_offset: vec3<f32>,      // Chunk position in world space
-  chunk_size: f32,              // Size of chunk (32)
-  material_root: u32,           // Root index for material SVDAG
-  material_node_count: u32,     // Number of nodes in material SVDAG
-  opaque_root: u32,             // Root index for opaque SVDAG
-  opaque_node_count: u32,       // Number of nodes in opaque SVDAG
+  world_offset: vec3<f32>,      // Chunk position in world space (12 bytes)
+  chunk_size: f32,              // Size of chunk (32) (4 bytes)
+  material_root: u32,           // Root index for material SVDAG (4 bytes)
+  material_node_count: u32,     // Number of nodes in material SVDAG (4 bytes)
+  _padding1: u32,               // Padding to align to 32 bytes (4 bytes)
+  _padding2: u32,               // Padding to align to 32 bytes (4 bytes)
+  // Total: 32 bytes (GPU requires 16-byte alignment)
 }
 
 struct BlockMaterial {
@@ -44,7 +45,7 @@ struct RenderParams {
   debug_mode: u32,  // 0=normal, 1=depth, 4=normals, 5=steps, 6=chunks, 7=memory, 8=dag
   max_distance: f32,  // Adaptive: reduces under memory pressure
   max_chunk_steps: u32,  // Adaptive: reduces under memory pressure
-  padding: u32,  // Align to 16 bytes
+  meta_skip_enabled: u32,  // Toggle for Meta-SVDAG spatial skip (M key)
 }
 
 struct Hit {
@@ -83,11 +84,17 @@ fn unpackDepth(packed: u32) -> u32 {
 @group(0) @binding(6) var<storage, read> materials: array<BlockMaterial>;
 @group(0) @binding(7) var<storage, read_write> chunkRequests: array<atomic<u32>>;
 @group(0) @binding(8) var<storage, read> chunkHashTable: array<u32>;
+@group(0) @binding(9) var<storage, read> metaGrid: array<u32>;  // Stage 7b: Spatial skip grid
 
 const MAX_STACK_DEPTH = 19;
 const MAX_STEPS = 256;
 const HASH_TABLE_SIZE = 8192u;  // 2x soft limit (3000 chunks * 2.7 = ~8k)
 const MAX_PROBE = 32u;  // Max linear probing steps
+
+// Meta-grid configuration (must match CPU side!)
+const META_CHUNK_SIZE = vec3<i32>(4, 4, 4);  // Each meta-chunk = 4x4x4 chunks (TUNABLE!)
+const META_GRID_SIZE = vec3<i32>(16, 16, 16);  // Grid dimensions
+const META_CENTER = vec3<i32>(8, 8, 8);  // Center offset
 
 // ============================================================================
 // CHUNK SPACE CONVERSIONS & DDA
@@ -200,6 +207,33 @@ fn chunkHash(coord: vec3<i32>) -> u32 {
   return h;
 }
 
+// Stage 7b: Meta-grid lookup for spatial skipping
+fn getMetaChunkIndex(chunkCoord: vec3<i32>) -> u32 {
+  // Convert chunk coord to meta-chunk coord
+  let metaCoord = vec3<i32>(
+    chunkCoord.x / META_CHUNK_SIZE.x,
+    chunkCoord.y / META_CHUNK_SIZE.y,
+    chunkCoord.z / META_CHUNK_SIZE.z
+  ) + META_CENTER;
+  
+  // Check bounds
+  if (metaCoord.x < 0 || metaCoord.x >= META_GRID_SIZE.x ||
+      metaCoord.y < 0 || metaCoord.y >= META_GRID_SIZE.y ||
+      metaCoord.z < 0 || metaCoord.z >= META_GRID_SIZE.z) {
+    return 0xFFFFFFFFu;  // Out of bounds
+  }
+  
+  return u32(metaCoord.x + metaCoord.y * META_GRID_SIZE.x + metaCoord.z * META_GRID_SIZE.x * META_GRID_SIZE.y);
+}
+
+fn isMetaChunkEmpty(chunkCoord: vec3<i32>) -> bool {
+  let metaIdx = getMetaChunkIndex(chunkCoord);
+  if (metaIdx == 0xFFFFFFFFu) {
+    return false;  // Out of bounds = not empty (don't skip)
+  }
+  return metaGrid[metaIdx] == 0u;  // 0 = empty, can skip!
+}
+
 fn getChunkIndexByCoord(chunkCoord: vec3<i32>) -> i32 {
   // Hash table lookup with linear probing
   let hash = chunkHash(chunkCoord);
@@ -246,7 +280,6 @@ fn traverseSVDAG(
   ray_origin: vec3<f32>,
   ray_dir: vec3<f32>,
   chunkIdx: i32,
-  useOpaque: bool,
   maxDist: f32
 ) -> Hit {
   var hit: Hit;
@@ -299,9 +332,9 @@ fn traverseSVDAG(
   // (Nodes will be offset by chunk.world_offset)
   let world_origin = ray_origin;
   
-  // Get root index and node count for this chunk
-  let root_idx = select(chunk.material_root, chunk.opaque_root, useOpaque);
-  let node_count = select(chunk.material_node_count, chunk.opaque_node_count, useOpaque);
+  // Get root index and node count for this chunk (Material DAG only)
+  let root_idx = chunk.material_root;
+  let node_count = chunk.material_node_count;
   
   // Empty chunk check: node_count == 0, NOT root_idx == 0!
   // (root_idx = 0 is VALID - it's the first node in the array)
@@ -472,6 +505,7 @@ fn raymarchChunks(ray_origin: vec3<f32>, ray_dir: vec3<f32>) -> Hit {
   // Initialize DDA
   var dda = initDDA(ray_origin, ray_dir);
   var steps = 0u;  // u32 to match Hit.chunk_steps
+  var meta_skips = 0u;  // Track how many meta-chunks we skipped
   
   // March through chunk grid using DDA
   while (steps < max_steps) {
@@ -483,7 +517,7 @@ fn raymarchChunks(ray_origin: vec3<f32>, ray_dir: vec3<f32>) -> Hit {
       break;
     }
     
-    // Try to find this chunk
+    // Try to find this chunk FIRST
     let chunkIdx = getChunkIndexByCoord(dda.current_chunk);
     
     if (chunkIdx == -1) {
@@ -496,15 +530,31 @@ fn raymarchChunks(ray_origin: vec3<f32>, ray_dir: vec3<f32>) -> Hit {
       // Return miss (sky color) - hole this frame
       closest_hit.distance = t_current;
       closest_hit.chunk_steps = steps;  // Track how many chunks we stepped through
+      closest_hit.steps = meta_skips;  // Reuse for meta-skip count in debug
       return closest_hit;
     }
     
-    // Chunk is loaded - traverse its SVDAG
-    var chunk_hit = traverseSVDAG(ray_origin, ray_dir, chunkIdx, false, max_dist);
+    // Stage 7b: Meta-SVDAG Spatial Skip - Skip empty meta-chunks (toggle with M key)
+    if (renderParams.meta_skip_enabled != 0u) {
+      let metaIdx = getMetaChunkIndex(dda.current_chunk);
+      if (metaIdx != 0xFFFFFFFFu && metaGrid[metaIdx] == 0u) {
+        // Meta-chunk is empty - skip it entirely!
+        meta_skips++;
+        stepDDA(&dda);
+        continue;
+      }
+    }
+    
+    // Chunk is loaded and has content - traverse its Material SVDAG
+    var chunk_hit = traverseSVDAG(ray_origin, ray_dir, chunkIdx, max_dist);
     
     if (chunk_hit.distance >= 0.0 && chunk_hit.distance < max_dist) {
       // Found a voxel!
       chunk_hit.chunk_steps = steps;  // Track how many chunks we stepped through
+      // In debug mode 10, replace steps with meta_skips for visualization
+      if (renderParams.debug_mode == 10u) {
+        chunk_hit.steps = meta_skips;
+      }
       return chunk_hit;
     }
     
@@ -514,6 +564,7 @@ fn raymarchChunks(ray_origin: vec3<f32>, ray_dir: vec3<f32>) -> Hit {
   
   // No hit - return with chunk step count
   closest_hit.chunk_steps = steps;
+  closest_hit.steps = meta_skips;  // For debug visualization
   return closest_hit;
 }
 
@@ -521,7 +572,7 @@ fn raymarchChunks(ray_origin: vec3<f32>, ray_dir: vec3<f32>) -> Hit {
 // RENDERING
 // ============================================================================
 
-fn shade(hit: Hit, ray_dir: vec3<f32>) -> vec3<f32> {
+fn shade(hit: Hit, ray_origin: vec3<f32>, ray_dir: vec3<f32>) -> vec3<f32> {
   // Debug mode 1: Depth map with color
   if (renderParams.debug_mode == 1u) {
     if (hit.distance < 0.0 || hit.block_id == 0u) {
@@ -617,29 +668,91 @@ fn shade(hit: Hit, ray_dir: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(0.0, 1.0, 0.0) * (0.5 + activity * 0.5); // Green = found
   }
   
-  // Normal rendering
-  if (hit.distance < 0.0 || hit.block_id == 0u) {
-    // Sky
-    let t = ray_dir.y * 0.5 + 0.5;
-    return mix(vec3<f32>(0.5, 0.7, 1.0), vec3<f32>(0.1, 0.3, 0.8), t);
+  // Debug mode 10: Meta-Skip efficiency (shows how many chunks were skipped)
+  if (renderParams.debug_mode == 10u) {
+    if (hit.chunk_steps == 0u) {
+      return vec3<f32>(0.0, 0.0, 0.0); // Black = no traversal
+    }
+    // Show skip efficiency: hit.steps = meta_skips, hit.chunk_steps = total steps
+    let skip_ratio = f32(hit.steps) / f32(hit.chunk_steps);
+    // Red = no skips (0%), Yellow = 50%, Green = many skips (100%)
+    var color = vec3<f32>(0.0);
+    if (skip_ratio < 0.5) {
+      // Red to yellow
+      color = mix(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(1.0, 1.0, 0.0), skip_ratio * 2.0);
+    } else {
+      // Yellow to green
+      color = mix(vec3<f32>(1.0, 1.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), (skip_ratio - 0.5) * 2.0);
+    }
+    return color;
   }
   
-  // Get material - use block_id to pick color
-  // If materials are broken, generate color from block_id
-  var final_color = vec3<f32>(0.3, 0.8, 0.3); // Default green
+  // Normal rendering - SINGLE DAG WITH CHANGE DETECTION
   
+  // Track material changes for transparency effects
+  var final_hit = hit;
+  var transparent_depth = 0.0;
+  var has_transparent = false;
+  var transparent_material: BlockMaterial;
+  
+  // Check if first hit is transparent
   if (hit.block_id > 0u && hit.block_id <= 15u) {
-    let mat = materials[hit.block_id];
-    let base_color = vec3<f32>(mat.colorR, mat.colorG, mat.colorB);
-    let color_brightness = base_color.r + base_color.g + base_color.b;
+    let hit_material = materials[hit.block_id];
+    
+    // If we hit transparent material, continue to find what's beneath/behind
+    if (hit_material.transparent > 0.5) {
+      has_transparent = true;
+      transparent_material = hit_material;
+      let transparent_start = hit.distance;
+      
+      // Continue ray from just past transparent surface
+      let continue_pos = ray_origin + ray_dir * (hit.distance + 0.1);
+      
+      // Keep raymarching to find next material change (solid or different transparent)
+      let next_hit = raymarchChunks(continue_pos, ray_dir);
+      
+      if (next_hit.block_id > 0u && next_hit.distance >= 0.0) {
+        // Found something beneath/behind transparent material
+        final_hit = next_hit;
+        final_hit.distance = hit.distance + next_hit.distance + 0.1;
+        transparent_depth = next_hit.distance; // Distance through transparent
+      } else {
+        // Nothing found - looking into infinite transparent (deep water/glass)
+        final_hit = hit;
+        transparent_depth = 100.0;
+      }
+    }
+  }
+  
+  // Sky background
+  if (final_hit.distance < 0.0 || final_hit.block_id == 0u) {
+    let t = ray_dir.y * 0.5 + 0.5;
+    var sky_color = mix(vec3<f32>(0.5, 0.7, 1.0), vec3<f32>(0.1, 0.3, 0.8), t);
+    
+    // If we're looking through transparent material at sky
+    if (has_transparent) {
+      let trans_color = vec3<f32>(transparent_material.colorR, transparent_material.colorG, transparent_material.colorB);
+      let trans_fog = clamp(transparent_depth * 0.02, 0.0, 0.9);
+      sky_color = mix(sky_color, trans_color * 0.3, trans_fog);
+    }
+    
+    return sky_color;
+  }
+  
+  // Get material color
+  var base_color = vec3<f32>(0.3, 0.8, 0.3); // Default green
+  
+  if (final_hit.block_id > 0u && final_hit.block_id <= 15u) {
+    let mat = materials[final_hit.block_id];
+    let mat_color = vec3<f32>(mat.colorR, mat.colorG, mat.colorB);
+    let color_brightness = mat_color.r + mat_color.g + mat_color.b;
     
     if (color_brightness > 0.1) {
-      // Material has valid color
-      final_color = base_color;
+      base_color = mat_color;
     } else {
-      // Material is black - generate color from block_id
-      let id_f = f32(hit.block_id);
-      final_color = vec3<f32>(
+      // Generate color from block_id
+      let id_f = f32(final_hit.block_id);
+      base_color = vec3<f32>(
         0.3 + (id_f * 0.23) % 0.7,
         0.3 + (id_f * 0.37) % 0.7,
         0.3 + (id_f * 0.51) % 0.7
@@ -649,11 +762,26 @@ fn shade(hit: Hit, ray_dir: vec3<f32>) -> vec3<f32> {
   
   // Simple lighting
   let light_dir = normalize(vec3<f32>(0.5, 1.0, 0.3));
-  let ndotl = max(dot(hit.normal, light_dir), 0.0);
+  let ndotl = max(dot(final_hit.normal, light_dir), 0.0);
   let ambient = 0.4;
   let diffuse = ndotl * 0.6;
   
-  return final_color * (ambient + diffuse);
+  var final_color = base_color * (ambient + diffuse);
+  
+  // Apply transparent effects if we're looking through transparent material
+  if (has_transparent && transparent_depth > 0.0) {
+    let trans_color = vec3<f32>(transparent_material.colorR, transparent_material.colorG, transparent_material.colorB);
+    let deep_trans = trans_color * 0.3;
+    
+    // Fog based on distance through transparent material
+    let trans_fog = clamp(transparent_depth * 0.03, 0.0, 0.85);
+    final_color = mix(final_color, deep_trans, trans_fog);
+    
+    // Add color tint
+    final_color = mix(final_color, final_color * trans_color * 1.5, 0.3);
+  }
+  
+  return final_color;
 }
 
 @compute @workgroup_size(8, 8)
@@ -674,11 +802,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     camera.up * uv.y * tan_half_fov
   );
   
-  // Raymarch through chunks
+  // Raymarch through chunks (Material DAG only - single-DAG system)
   let hit = raymarchChunks(camera.position, ray_dir);
   
   // Shade
-  let color = shade(hit, ray_dir);
+  let color = shade(hit, camera.position, ray_dir);
   
   textureStore(outputTexture, global_id.xy, vec4<f32>(color, 1.0));
 }

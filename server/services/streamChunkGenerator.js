@@ -154,6 +154,50 @@ export class StreamChunkGenerator {
           }
         }
         break;
+        
+      case 'WATER_POND':
+        // Flat grass world with water ponds to test dual-DAG transparency
+        if (cy === 4) {
+          // Layer 0: Grass base (everywhere)
+          for (let z = 0; z < chunkSize; z++) {
+            for (let x = 0; x < chunkSize; x++) {
+              const voxelIdx = z * chunkSize * chunkSize + 0 * chunkSize + x;
+              voxelGrid[voxelIdx] = 1; // Grass
+            }
+          }
+          
+          // Create circular ponds every 64 blocks
+          const worldCenterX = cx * chunkSize + 16;
+          const worldCenterZ = cz * chunkSize + 16;
+          
+          // Check if this chunk should have a pond center
+          const pondSpacing = 64;
+          const nearestPondX = Math.round(worldCenterX / pondSpacing) * pondSpacing;
+          const nearestPondZ = Math.round(worldCenterZ / pondSpacing) * pondSpacing;
+          
+          // Add water layers 1-3 (3 blocks deep) in circular ponds
+          for (let z = 0; z < chunkSize; z++) {
+            for (let x = 0; x < chunkSize; x++) {
+              const worldX = cx * chunkSize + x;
+              const worldZ = cz * chunkSize + z;
+              
+              // Distance from nearest pond center
+              const dx = worldX - nearestPondX;
+              const dz = worldZ - nearestPondZ;
+              const distSq = dx * dx + dz * dz;
+              const pondRadius = 20; // 20 block radius
+              
+              if (distSq <= pondRadius * pondRadius) {
+                // Inside pond - add water layers
+                for (let y = 1; y <= 3; y++) { // Water at y=1,2,3
+                  const voxelIdx = z * chunkSize * chunkSize + y * chunkSize + x;
+                  voxelGrid[voxelIdx] = 6; // Water (material ID 6)
+                }
+              }
+            }
+          }
+        }
+        break;
     }
     
     return voxelGrid;
@@ -170,7 +214,7 @@ export class StreamChunkGenerator {
     // 🧪 TEST WORLD MODE - Predictable patterns for validation
     // ========================================================================
     const TEST_MODE = true;  // Set to true for testing
-    const TEST_PATTERN = 'CHECKERBOARD';  // Options: 'FLAT_WORLD', 'CHECKERBOARD', 'STRIPES', 'STEPS'
+    const TEST_PATTERN = 'WATER_POND';  // Options: 'FLAT_WORLD', 'CHECKERBOARD', 'STRIPES', 'STEPS', 'WATER_POND'
     
     if (TEST_MODE) {
       return this.generateTestPattern(voxelGrid, cx, cy, cz, TEST_PATTERN);

@@ -80,11 +80,21 @@ export class ChunkedSvdagRenderer {
     this.totalEvicted = 0;          // Track total evictions
     this.adaptiveMaxDistance = 2048;  // Adaptive render distance
     this.adaptiveMaxChunkSteps = 128; // Adaptive chunk steps
+    
+    // Meta-SVDAG Spatial Skip (Stage 7b) - CONFIGURABLE!
+    this.metaChunkSize = { x: 4, y: 4, z: 4 };  // Each meta-chunk = 4x4x4 chunks (TUNABLE!)
+    this.metaGridSize = { x: 16, y: 16, z: 16 };  // Total meta-grid size
+    this.metaGrid = new Uint32Array(16 * 16 * 16);  // 4096 meta-chunks (16KB, must match shader u32!)
+    this.metaGridBuffer = null;
+    this.metaGridReadbackDone = false;  // Flag for one-time GPU readback test
+    this.metaSkipEnabled = true;  // Toggle for meta-SVDAG spatial skip
+    
     this.gpuMemoryUsed = {
       metadata: 0,
       nodes: 0,
       leaves: 0,
-      hashTable: 32768  // 8192 * 4 bytes
+      hashTable: 32768,  // 8192 * 4 bytes
+      metaGrid: 16384    // 16*16*16 * 4 bytes (u32)
     };
     this.fps = 60;
     this.fpsFrames = [];
@@ -234,6 +244,17 @@ export class ChunkedSvdagRenderer {
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
     });
     
+    // Meta-grid buffer (Stage 7b)
+    this.metaGridBuffer = this.device.createBuffer({
+      size: 16 * 16 * 16 * 4, // 16KB for meta-grid (16x16x16 u32 entries)
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      mappedAtCreation: true  // Initialize to zeros!
+    });
+    // Zero out the buffer
+    new Uint32Array(this.metaGridBuffer.getMappedRange()).fill(0);
+    this.metaGridBuffer.unmap();
+    console.log('✅ Meta-grid buffer initialized to zeros');
+    
     // Create pipeline
     const shaderModule = this.device.createShaderModule({ code: shaderCode });
     
@@ -254,7 +275,8 @@ export class ChunkedSvdagRenderer {
         { binding: 5, resource: this.computeTexture.createView() },
         { binding: 6, resource: { buffer: this.materialsBuffer } },
         { binding: 7, resource: { buffer: this.chunkRequestBuffer } },
-        { binding: 8, resource: { buffer: this.chunkHashTableBuffer } }
+        { binding: 8, resource: { buffer: this.chunkHashTableBuffer } },
+        { binding: 9, resource: { buffer: this.metaGridBuffer } }  // Stage 7b: Meta-grid
       ]
     });
     
@@ -392,6 +414,9 @@ export class ChunkedSvdagRenderer {
       <div><b>7</b> - Memory</div>
       <div><b>8</b> - DAG</div>
       <div><b>9</b> - Freeze chunks</div>
+      <div><b>-</b> - Skip efficiency</div>
+      <div style="margin-top: 8px; color: #0ff; font-weight: bold;">⚡ Optimizations</div>
+      <div><b>M</b> - Toggle Meta-Skip</div>
       <div style="margin-top: 8px; color: #0ff; font-weight: bold;">🔍 Debug</div>
       <div><b>L</b> - Dump buffer state</div>
     `;
@@ -444,7 +469,7 @@ export class ChunkedSvdagRenderer {
     const pos = this.camera.position;
     const camChunk = this.chunkManager.worldToChunk(pos[0], pos[1], pos[2]);
     
-    const debugModeNames = ['Normal', 'Depth', '??', '??', 'Normals', 'Chunk Steps', 'Chunks', 'Memory', 'DAG'];
+    const debugModeNames = ['Normal', 'Depth', '??', '??', 'Normals', 'Chunk Steps', 'Chunks', 'Memory', 'DAG', 'Freeze', 'Skip Efficiency'];
     const modeName = debugModeNames[this.debugMode] || 'Unknown';
     
     // Find min/max loaded chunks to show range
@@ -492,6 +517,14 @@ export class ChunkedSvdagRenderer {
       <div><b>Per chunk:</b> ${avgPerChunk} KB</div>
       <div style="font-size: 10px; color: #aaa;">Metadata: ${(this.gpuMemoryUsed.metadata/1024).toFixed(1)}KB | Nodes: ${(this.gpuMemoryUsed.nodes/1024).toFixed(1)}KB</div>
       <div style="font-size: 10px; color: #aaa;">Leaves: ${(this.gpuMemoryUsed.leaves/1024).toFixed(1)}KB | Hash: ${(this.gpuMemoryUsed.hashTable/1024).toFixed(1)}KB</div>
+      <div style="margin-top: 6px; color: #f80; font-weight: bold;">🗺️ Meta-SVDAG Skip</div>
+      <div><b>Status:</b> <span style="color:${this.metaSkipEnabled ? '#0f0' : '#f00'}">${this.metaSkipEnabled ? 'ON ✅' : 'OFF ❌'}</span> <span style="color:#888">(M key)</span></div>
+      <div><b>Meta chunk:</b> ${this.metaChunkSize.x}x${this.metaChunkSize.y}x${this.metaChunkSize.z} (${this.metaChunkSize.x * this.metaChunkSize.y * this.metaChunkSize.z} chunks)</div>
+      <div><b>Meta-chunks:</b> ${Array.from(this.metaGrid).filter(v => v === 1).length}/${this.metaGrid.length} populated</div>
+      <div style="margin-top: 6px; color: #0ff; font-weight: bold;">♻️ SVDAG Dedup</div>
+      <div><b>Unique:</b> ${this.chunkManager.svdagPool.size}/${chunks}</div>
+      <div><b>Savings:</b> <span style="color:#0f0">${chunks > 0 ? ((1 - this.chunkManager.svdagPool.size / chunks) * 100).toFixed(1) : 0}%</span></div>
+      <div><b>Memory saved:</b> ${((chunks - this.chunkManager.svdagPool.size) * 0.05).toFixed(1)} MB</div>
       <div style="margin-top: 6px; color: #f0f; font-weight: bold;">📍 Position</div>
       <div><b>World:</b> ${pos[0].toFixed(1)}, ${pos[1].toFixed(1)}, ${pos[2].toFixed(1)}</div>
       <div><b>Chunk:</b> <span style="color:${rangeColor}">(${camChunk.cx}, ${camChunk.cy}, ${camChunk.cz})</span></div>
@@ -507,29 +540,54 @@ export class ChunkedSvdagRenderer {
       this.keys[e.code] = true;
       
       // Debug mode cycling (avoid keys 2 and 3)
-      if (e.code === 'Digit1') {
-        this.debugMode = 1; // Depth
-        console.log('🎨 Debug: DEPTH');
-      }
-      if (e.code === 'Digit4') {
-        this.debugMode = 4; // Normals
-        console.log('🎨 Debug: NORMALS');
-      }
-      if (e.code === 'Digit5') {
-        this.debugMode = 5; // Chunk steps heatmap
-        console.log('🎨 Debug: CHUNK STEPS HEATMAP (how many chunks ray traversed)');
-      }
-      if (e.code === 'Digit6') {
-        this.debugMode = 6; // Chunk boundaries
-        console.log('🎨 Debug: CHUNK BOUNDARIES');
-      }
-      if (e.code === 'Digit7') {
-        this.debugMode = 7; // Memory heatmap
-        console.log('🎨 Debug: MEMORY HEATMAP');
-      }
-      if (e.code === 'Digit8') {
-        this.debugMode = 8; // DAG structure
-        console.log('🎨 Debug: DAG STRUCTURE');
+      switch (e.code) {
+        case 'Digit9':
+          this.debugMode = 9;
+          console.log('🎨 Debug: FREEZE CHUNKS');
+          break;
+        case 'Minus':
+        case 'NumpadSubtract':
+          this.debugMode = 10;
+          console.log('🎨 Debug: META-SKIP EFFICIENCY (green=many skips, red=no skips)');
+          break;
+        case 'KeyM':
+          this.metaSkipEnabled = !this.metaSkipEnabled;
+          console.log(`🗺️ Meta-SVDAG Skip: ${this.metaSkipEnabled ? 'ENABLED ✅' : 'DISABLED ❌'} - See HUD for stats!`);
+          break;
+        case 'Digit4':
+          this.debugMode = 4; // Normals
+          console.log('🎨 Debug: NORMALS');
+          break;
+        case 'Digit5':
+          this.debugMode = 5; // Chunk steps heatmap
+          console.log('🎨 Debug: CHUNK STEPS HEATMAP (how many chunks ray traversed)');
+          break;
+        case 'Digit6':
+          this.debugMode = 6; // Chunk boundaries
+          console.log('🎨 Debug: CHUNK BOUNDARIES');
+          break;
+        case 'Digit7':
+          this.debugMode = 7; // Memory heatmap
+          console.log('🎨 Debug: MEMORY HEATMAP');
+          break;
+        case 'Digit8':
+          this.debugMode = 8; // DAG structure
+          console.log('🎨 Debug: DAG STRUCTURE');
+          break;
+        case 'Digit0':
+          this.debugMode = 0; // Normal rendering
+          console.log('🎨 Debug: NORMAL');
+          break;
+        case 'Digit1':
+          this.debugMode = 1; // Depth
+          console.log('🎨 Debug: DEPTH');
+          break;
+        case 'KeyL':
+          this.dumpBufferState();
+          break;
+        case 'Escape':
+          document.exitPointerLock();
+          break;
       }
       if (e.code === 'Digit9') {
         this.freezeChunks = !this.freezeChunks;
@@ -1158,8 +1216,11 @@ export class ChunkedSvdagRenderer {
       // Log if: big change (>50 chunks) OR 5 seconds passed
       const shouldLog = requestChange > 50 || timeSinceLog > 5000;
       
-      if (shouldLog) {
-        console.log(`📦 ${requested.length} requests, ${this.chunkManager.chunks.size}/${this.chunkManager.maxCachedChunks} loaded`);
+      if (shouldLog || requested.length <= 10) {
+        const reqStr = requested.length <= 5 
+          ? requested.map(r => `(${r.cx},${r.cy},${r.cz})`).join(', ')
+          : `${requested.length} chunks`;
+        console.log(`📦 ${reqStr}, ${this.chunkManager.chunks.size}/${this.chunkManager.maxCachedChunks} loaded`);
         this.lastLogTime = now;
       }
       
@@ -1271,6 +1332,86 @@ export class ChunkedSvdagRenderer {
     return hashTable;
   }
 
+  buildMetaGrid(chunks) {
+    // Stage 7b: Build meta-grid for spatial skipping
+    // Group chunks into meta-chunks and mark which are empty/solid
+    
+    // DEBUG: Check grid before clearing
+    const beforeNonZero = Array.from(this.metaGrid).filter(v => v !== 0).length;
+    const beforeBadValues = Array.from(this.metaGrid).filter(v => v !== 0 && v !== 1);
+    
+    this.metaGrid.fill(0);  // 0 = empty/unknown
+    
+    // DEBUG: Verify fill worked
+    const afterFill = Array.from(this.metaGrid).filter(v => v !== 0).length;
+    if (afterFill !== 0) {
+      console.error(`❌ FILL FAILED! ${afterFill} non-zero values remain after fill(0)`);
+    }
+    
+    const metaSizeX = this.metaChunkSize.x;
+    const metaSizeY = this.metaChunkSize.y;
+    const metaSizeZ = this.metaChunkSize.z;
+    const gridSizeX = this.metaGridSize.x;
+    const gridSizeY = this.metaGridSize.y;
+    const gridSizeZ = this.metaGridSize.z;
+    const centerX = Math.floor(gridSizeX / 2);
+    const centerY = Math.floor(gridSizeY / 2);
+    const centerZ = Math.floor(gridSizeZ / 2);
+    
+    let solidCount = 0;
+    let markedChunks = 0;
+    
+    for (const chunk of chunks) {
+      // Convert chunk coord to meta-chunk coord
+      const metaX = Math.floor(chunk.cx / metaSizeX) + centerX;
+      const metaY = Math.floor(chunk.cy / metaSizeY) + centerY;
+      const metaZ = Math.floor(chunk.cz / metaSizeZ) + centerZ;
+      
+      // Check bounds
+      if (metaX >= 0 && metaX < gridSizeX && 
+          metaY >= 0 && metaY < gridSizeY && 
+          metaZ >= 0 && metaZ < gridSizeZ) {
+        
+        const metaIndex = metaX + metaY * gridSizeX + metaZ * gridSizeX * gridSizeY;
+        
+        // Check if chunk has content (Material DAG only now)
+        const matNodes = chunk.materialSVDAG?.nodes?.length || 0;
+        
+        // Has content if Material DAG has nodes
+        const hasContent = matNodes > 1;
+        
+        // DEBUG: Log suspicious cases only
+        if (!hasContent && matNodes > 0) {
+          console.warn(`⚠️ Chunk (${chunk.cx},${chunk.cy},${chunk.cz}) has nodes but marked empty: matNodes=${matNodes}`);
+        }
+        
+        // If ANY chunk in this meta-chunk has content, mark the whole meta-chunk as solid
+        if (hasContent) {
+          markedChunks++;
+          if (this.metaGrid[metaIndex] === 0) {
+            this.metaGrid[metaIndex] = 1;  // Mark meta-chunk as has content
+            solidCount++;  // Count meta-chunks, not individual chunks
+          }
+        }
+      }
+    }
+    
+    // DEBUG: Always log for first 10 frames or periodically
+    const afterNonZero = Array.from(this.metaGrid).filter(v => v !== 0).length;
+    const afterBadValues = Array.from(this.metaGrid).filter(v => v !== 0 && v !== 1);
+    
+    if (this.frameCount < 60 || this.frameCount % 60 === 0) {
+      console.log(`🗺️ META-GRID BUILD [F${this.frameCount}]: ${markedChunks}/${chunks.length} chunks → ${solidCount} meta-chunks, before=${beforeNonZero}/${beforeBadValues.length} bad, after=${afterNonZero}/${afterBadValues.length} bad`);
+      
+      if (beforeBadValues.length > 0) {
+        console.error(`❌ BAD VALUES BEFORE BUILD:`, beforeBadValues.slice(0, 10));
+      }
+      if (afterBadValues.length > 0) {
+        console.error(`❌ BAD VALUES AFTER BUILD:`, afterBadValues.slice(0, 10));
+      }
+    }
+  }
+
   uploadChunksToGPU() {
     // Get all loaded chunks and upload to GPU
     // NOTE: No sorting! Hash table handles lookup, order doesn't matter.
@@ -1282,8 +1423,17 @@ export class ChunkedSvdagRenderer {
     
     // Update lastSeenFrame for all chunks being uploaded (they're actively rendered)
     const now = Date.now();
+    let updatedCount = 0;
     for (const chunk of chunks) {
-      chunk.lastSeenFrame = now;
+      const oldTimestamp = chunk.lastSeenFrame;
+      chunk.lastSeenFrame = now;  // Direct update works (arrays contain references)
+      if (oldTimestamp < 1000 || !oldTimestamp) {
+        console.warn(`⚠️ Chunk (${chunk.cx},${chunk.cy},${chunk.cz}) had bad timestamp ${oldTimestamp}, fixed to ${now}`);
+      }
+      updatedCount++;
+    }
+    if (this.frameCount % 300 === 0 && updatedCount > 0) {
+      console.log(`✅ Updated lastSeenFrame for ${updatedCount} chunks`);
     }
     
     // CRITICAL: Track uploaded count for render() to use
@@ -1357,8 +1507,9 @@ export class ChunkedSvdagRenderer {
       console.error(`🐛 CRITICAL: ${invalidCount}/${chunks.length} chunks have invalid coordinates!`);
     }
     
-    // Build chunk metadata with CORRECT TYPES (mix of f32 and u32)
-    // Struct layout: vec3<f32> (12 bytes) + f32 (4 bytes) + 4x u32 (16 bytes) = 32 bytes per chunk
+    // Build chunk metadata - MATERIAL DAG ONLY (single-DAG system)
+    // Struct layout: vec3<f32> (12) + f32 (4) + 2x u32 (8) + 2x u32 padding (8) = 32 bytes per chunk
+    // GPU requires 16-byte alignment, so we pad to 32 bytes
     const bytesPerChunk = 32;
     const buffer = new ArrayBuffer(chunks.length * bytesPerChunk);
     const floatView = new Float32Array(buffer);
@@ -1390,26 +1541,15 @@ export class ChunkedSvdagRenderer {
       const matRootInCombined = nodesOffset + chunk.materialSVDAG.rootIdx;
       uintView[uintOffset + 4] = matRootInCombined;
       uintView[uintOffset + 5] = chunk.materialSVDAG.nodes.length;
+      // uintView[uintOffset + 6] = 0;  // padding1 (optional, already zero)
+      // uintView[uintOffset + 7] = 0;  // padding2 (optional, already zero)
       
       // Add material nodes/leaves to combined buffers
       allNodes.push(...chunk.materialSVDAG.nodes);
       allLeaves.push(...chunk.materialSVDAG.leaves);
       
-      const matNodesCount = chunk.materialSVDAG.nodes.length;
-      nodesOffset += matNodesCount;
+      nodesOffset += chunk.materialSVDAG.nodes.length;
       leavesOffset += chunk.materialSVDAG.leaves.length;
-      
-      // Opaque SVDAG - store root index (offset into combined buffer) + node count - as UINTS!
-      const opqRootInCombined = nodesOffset + chunk.opaqueSVDAG.rootIdx;
-      uintView[uintOffset + 6] = opqRootInCombined;
-      uintView[uintOffset + 7] = chunk.opaqueSVDAG.nodes.length;
-      
-      // Add opaque nodes/leaves to combined buffers
-      allNodes.push(...chunk.opaqueSVDAG.nodes);
-      allLeaves.push(...chunk.opaqueSVDAG.leaves);
-      
-      nodesOffset += chunk.opaqueSVDAG.nodes.length;
-      leavesOffset += chunk.opaqueSVDAG.leaves.length;
     }
     
     // Upload to GPU (use the ArrayBuffer directly)
@@ -1420,6 +1560,112 @@ export class ChunkedSvdagRenderer {
     // Build and upload hash table for O(1) chunk lookups
     const hashTable = this.buildChunkHashTable(chunks);
     this.device.queue.writeBuffer(this.chunkHashTableBuffer, 0, hashTable);
+    
+    // Hash table uploaded (debug logging disabled)
+    
+    // Stage 7b: Build and upload meta-grid for spatial skipping
+    this.buildMetaGrid(chunks);
+    
+    // DEBUG: Verify BEFORE upload
+    const beforeUpload = [];
+    for (let i = 0; i < this.metaGrid.length; i++) {
+      if (this.metaGrid[i] !== 0) {
+        beforeUpload.push(this.metaGrid[i]);
+      }
+    }
+    
+    // Upload to GPU - ALWAYS log first frame to verify setup
+    const expectedBytes = 16 * 16 * 16 * 4;  // 16KB for u32 array
+    const actualBytes = this.metaGrid.byteLength;
+    const arrayType = this.metaGrid.constructor.name;
+    
+    // Log type info on first upload
+    if (this.frameCount <= 20) {
+      console.log(`📊 [F${this.frameCount}] Uploading ${arrayType}, ${actualBytes} bytes`);
+    }
+    
+    if (actualBytes !== expectedBytes) {
+      console.error(`❌ BUFFER SIZE MISMATCH! Expected ${expectedBytes} bytes, got ${actualBytes} bytes`);
+    }
+    
+    if (arrayType !== 'Uint32Array') {
+      console.error(`❌ WRONG ARRAY TYPE! Expected Uint32Array, got ${arrayType}`);
+    }
+    
+    // Write to GPU buffer
+    this.device.queue.writeBuffer(this.metaGridBuffer, 0, this.metaGrid);
+    
+    // CRITICAL: Verify the buffer size matches what we're uploading
+    if (this.metaGridBuffer.size !== expectedBytes) {
+      console.error(`❌ GPU BUFFER SIZE WRONG! Buffer is ${this.metaGridBuffer.size} bytes, should be ${expectedBytes} bytes`);
+    }
+    
+    // SMOKING GUN TEST: Read back values around where chunks should be (indices 2190-2210)
+    // Chunks near (0,4,0) map to meta-index ~2200
+    if (this.frameCount >= 20 && this.frameCount <= 25 && !this.metaGridReadbackDone) {
+      this.metaGridReadbackDone = true;
+      
+      console.log(`🔬 Starting GPU readback at frame ${this.frameCount}...`);
+      
+      const startIndex = 2190;  // Check around where (0,4,0) chunks should map
+      const count = 20;
+      const readBuffer = this.device.createBuffer({
+        size: count * 4, // 20 u32 values = 80 bytes
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+      });
+      
+      const commandEncoder = this.device.createCommandEncoder();
+      commandEncoder.copyBufferToBuffer(this.metaGridBuffer, startIndex * 4, readBuffer, 0, count * 4);
+      this.device.queue.submit([commandEncoder.finish()]);
+      
+      // Read back asynchronously
+      readBuffer.mapAsync(GPUMapMode.READ).then(() => {
+        const data = new Uint32Array(readBuffer.getMappedRange());
+        const values = Array.from(data);
+        console.log(`🔬 GPU READBACK [F${this.frameCount}]: Values at indices [${startIndex}-${startIndex+count-1}]:`, values);
+        
+        // Also log which JS values should be there
+        const jsValues = Array.from(this.metaGrid.slice(startIndex, startIndex + count));
+        console.log(`📋 JavaScript array at same indices:`, jsValues);
+        
+        const badGPU = values.filter(v => v !== 0 && v !== 1);
+        if (badGPU.length > 0) {
+          console.error(`❌ GPU HAS CORRUPT DATA! Found ${badGPU.length} bad values:`, badGPU);
+        } else {
+          // Check if JS and GPU match
+          const matches = values.every((v, i) => v === jsValues[i]);
+          if (matches) {
+            console.log(`✅ GPU data MATCHES JavaScript! Upload is working correctly!`);
+          } else {
+            console.error(`❌ GPU data DIFFERS from JavaScript! Upload or buffer issue!`);
+          }
+        }
+        readBuffer.unmap();
+        readBuffer.destroy();
+      });
+    }
+    
+    // DEBUG: Verify AFTER upload
+    const afterUpload = [];
+    const badValues = [];
+    for (let i = 0; i < this.metaGrid.length; i++) {
+      const val = this.metaGrid[i];
+      if (val !== 0) {
+        afterUpload.push(val);
+        if (val !== 1) {
+          badValues.push(val);
+        }
+      }
+    }
+    
+    // Log summary every upload
+    console.log(`📤 [F${this.frameCount}] Meta-grid: BEFORE=${beforeUpload.length}, AFTER=${afterUpload.length}, BAD=${badValues.length}`);
+    if (beforeUpload.length !== afterUpload.length) {
+      console.error(`❌ ARRAY MODIFIED DURING UPLOAD! Before: ${beforeUpload.length}, After: ${afterUpload.length}`);
+    }
+    if (badValues.length > 0) {
+      console.error(`❌ CORRUPT VALUES:`, badValues.slice(0, 20));
+    }
     
     // Track GPU memory usage
     this.gpuMemoryUsed.metadata = buffer.byteLength;
@@ -1482,7 +1728,7 @@ export class ChunkedSvdagRenderer {
     this.adaptiveMaxChunkSteps = maxChunkSteps;
     
     // Update render params EVERY frame (includes debug mode!)
-    // Struct: time, max_chunks, chunk_size, max_depth, debug_mode, max_distance, max_chunk_steps, padding
+    // Struct: time, max_chunks, chunk_size, max_depth, debug_mode, max_distance, max_chunk_steps, meta_skip_enabled
     const renderParamsBuffer = new ArrayBuffer(32);  // 8 * 4 bytes
     const renderParamsView = new DataView(renderParamsBuffer);
     
@@ -1493,7 +1739,7 @@ export class ChunkedSvdagRenderer {
     renderParamsView.setUint32(16, this.debugMode, true);  // debug_mode
     renderParamsView.setFloat32(20, maxDistance, true);  // max_distance
     renderParamsView.setUint32(24, maxChunkSteps, true);  // max_chunk_steps
-    renderParamsView.setUint32(28, 0, true);  // padding
+    renderParamsView.setUint32(28, this.metaSkipEnabled ? 1 : 0, true);  // meta_skip_enabled
     
     this.device.queue.writeBuffer(this.renderParamsBuffer, 0, renderParamsBuffer);
     

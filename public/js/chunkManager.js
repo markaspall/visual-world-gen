@@ -23,6 +23,10 @@ export class ChunkManager {
     // Camera position for distance-based eviction
     this.cameraPosition = [0, 0, 0];
     
+    // SVDAG Deduplication Pool (Stage 7a)
+    this.svdagPool = new Map();  // hash → {id, nodes, leaves, refCount}
+    this.nextPoolId = 0;
+    
     // Adaptive eviction thresholds (for a game, not a map!)
     this.evictionThresholds = [
       60000,   // 1 minute (normal operation)
@@ -181,6 +185,28 @@ export class ChunkManager {
   }
 
   /**
+   * Hash an SVDAG for deduplication
+   * Uses a simple rolling hash over nodes and leaves data
+   */
+  hashSVDAG(nodes, leaves) {
+    let hash = 0;
+    
+    // Hash nodes
+    for (let i = 0; i < nodes.length; i++) {
+      hash = ((hash << 5) - hash) + nodes[i];
+      hash = hash & hash; // Convert to 32-bit int
+    }
+    
+    // Hash leaves
+    for (let i = 0; i < leaves.length; i++) {
+      hash = ((hash << 5) - hash) + leaves[i];
+      hash = hash & hash;
+    }
+    
+    return hash.toString(36); // Base-36 string for Map key
+  }
+
+  /**
    * Load chunk (fetch if needed, cache if possible)
    */
   async loadChunk(cx, cy, cz) {
@@ -213,15 +239,50 @@ export class ChunkManager {
       const chunkData = await this.fetchChunk(cx, cy, cz);
       
       if (chunkData) {
-        // Add to cache with timestamps
         const now = Date.now();
-        // Store chunk data (even if empty - shader needs to know it exists)
-        this.chunks.set(key, {
+        
+        // Stage 7a: Hash the Material SVDAG for deduplication
+        const hash = this.hashSVDAG(chunkData.materialSVDAG.nodes, chunkData.materialSVDAG.leaves);
+        
+        // Check if we've seen this SVDAG pattern before
+        let poolId;
+        if (this.svdagPool.has(hash)) {
+          // DUPLICATE! Reuse existing SVDAG
+          const poolEntry = this.svdagPool.get(hash);
+          poolEntry.refCount++;
+          poolId = poolEntry.id;
+          console.log(`♻️ Dedup: Chunk (${cx},${cy},${cz}) reuses Material SVDAG #${poolId} (${poolEntry.refCount} refs)`);
+        } else {
+          // NEW PATTERN! Add to pool
+          poolId = this.nextPoolId++;
+          this.svdagPool.set(hash, {
+            id: poolId,
+            nodes: chunkData.materialSVDAG.nodes,
+            leaves: chunkData.materialSVDAG.leaves,
+            refCount: 1
+          });
+          console.log(`🆕 New: Chunk (${cx},${cy},${cz}) adds Material SVDAG #${poolId}`);
+        }
+        
+        // Store chunk data with SVDAG reference
+        // CRITICAL: Set timestamps AFTER spread to avoid being overwritten
+        const chunkObject = {
           cx, cy, cz, 
           ...chunkData,
-          loadedFrame: now,      // Track when loaded
-          lastSeenFrame: now     // Track when last seen by rays
-        });
+          svdagHash: hash,
+          svdagPoolId: poolId
+        };
+        // Force correct timestamps (don't let server data override)
+        chunkObject.loadedFrame = now;
+        chunkObject.lastSeenFrame = now;
+        this.chunks.set(key, chunkObject);
+        
+        // DEBUG: Verify timestamp was set correctly
+        const storedChunk = this.chunks.get(key);
+        if (!storedChunk.lastSeenFrame || storedChunk.lastSeenFrame < 1000) {
+          console.error(`🐛 BUG: Chunk ${key} has invalid lastSeenFrame: ${storedChunk.lastSeenFrame} (should be ${now})`);
+        }
+        
         this.stats.chunksLoaded++;
         
         // NOTE: Eviction moved to renderer (once per frame, not per chunk)
@@ -331,14 +392,42 @@ export class ChunkManager {
         continue;  // Don't evict chunks with fixed timestamps
       }
       
+      // Defensive: Fix clearly invalid timestamps (< 1 year since epoch = corrupted)
+      const ONE_YEAR_MS = 365 * 24 * 60 * 60 * 1000;
+      if (chunk.lastSeenFrame < ONE_YEAR_MS) {
+        // Silently fix corrupt timestamps (TODO: fix root cause)
+        chunk.lastSeenFrame = now;
+        continue;  // Don't evict, just fixed it
+      }
+      
       const age = now - chunk.lastSeenFrame;
+      
+      // Defensive: Never evict chunks less than 1 second old (prevents timestamp bugs)
+      if (age < 1000) {
+        continue;  // Skip recently loaded chunks
+      }
+      
       if (age > ANCIENT_TIME) {
         ancientChunks.push(key);
-        console.log(`  Ancient chunk ${key}: ${(age / 60000).toFixed(1)} minutes old`);
+        console.log(`  Ancient chunk ${key}: ${(age / 60000).toFixed(1)} minutes old (lastSeen: ${chunk.lastSeenFrame}, now: ${now})`);
       }
     }
     
     for (const key of ancientChunks) {
+      const chunk = this.chunks.get(key);
+      
+      // Stage 7a: Decrement SVDAG refcount
+      if (chunk && chunk.svdagHash) {
+        const poolEntry = this.svdagPool.get(chunk.svdagHash);
+        if (poolEntry) {
+          poolEntry.refCount--;
+          if (poolEntry.refCount === 0) {
+            this.svdagPool.delete(chunk.svdagHash);
+            console.log(`  🗑️ SVDAG #${poolEntry.id} freed (no more refs)`);
+          }
+        }
+      }
+      
       this.chunks.delete(key);
     }
     
@@ -414,6 +503,20 @@ export class ChunkManager {
     // Remove worst chunks
     const removed = [];
     for (let i = 0; i < actualTarget; i++) {
+      const chunk = this.chunks.get(scored[i].key);
+      
+      // Stage 7a: Decrement SVDAG refcount
+      if (chunk && chunk.svdagHash) {
+        const poolEntry = this.svdagPool.get(chunk.svdagHash);
+        if (poolEntry) {
+          poolEntry.refCount--;
+          if (poolEntry.refCount === 0) {
+            this.svdagPool.delete(chunk.svdagHash);
+            console.log(`  🗑️ SVDAG #${poolEntry.id} freed (no more refs)`);
+          }
+        }
+      }
+      
       this.chunks.delete(scored[i].key);
       removed.push({
         dist: scored[i].distance.toFixed(1),
