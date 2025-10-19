@@ -88,8 +88,8 @@ fn unpackDepth(packed: u32) -> u32 {
 
 const MAX_STACK_DEPTH = 19;
 const MAX_STEPS = 256;
-const HASH_TABLE_SIZE = 8192u;  // 2x soft limit (3000 chunks * 2.7 = ~8k)
-const MAX_PROBE = 32u;  // Max linear probing steps
+const HASH_TABLE_SIZE = 65536u;  // 64K slots for 25K chunks (load factor ~0.4)
+const MAX_PROBE = 64u;  // Max linear probing steps
 
 // Meta-grid configuration (must match CPU side!)
 const META_CHUNK_SIZE = vec3<i32>(4, 4, 4);  // Each meta-chunk = 4x4x4 chunks (TUNABLE!)

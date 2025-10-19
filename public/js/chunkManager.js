@@ -15,27 +15,43 @@ export class ChunkManager {
     this.loadQueue = [];
     this.loading = new Set();
     
-    // Cache limits  
-    this.maxCachedChunks = 5000;  // Large budget for now - meta-SVDAG will optimize later (Stage 7)
+    // Cache limits - Dual Eviction System
+    this.hardCacheLimit = 25000;  // Hard limit - emergency eviction
+    this.softCacheLimit = 20000;  // Soft limit - proactive trimming
+    this.maxCachedChunks = this.hardCacheLimit; // For compatibility
     this.chunkSize = 32; // 32x32x32 voxels
     this.loadRadius = 2; // Load chunks within 2 chunk radius (5x5x5 = 125 chunks)
     
     // Camera position for distance-based eviction
     this.cameraPosition = [0, 0, 0];
     
+    // Eviction timing
+    this.lastEvictionTime = 0;
+    this.evictionCooldown = 3000;  // 3 seconds between evictions
+    this.trimInterval = 5000;       // Proactive trim every 5 seconds
+    this.lastProactiveTrim = 0;
+    
+    // Eviction configuration
+    this.trimTargetRatio = 0.9;     // Trim to 90% of soft limit
+    this.emergencyTargetRatio = 0.8; // Emergency: 80% of soft limit
+    this.maxEvictionsPerFrame = 100; // Don't evict too many at once
+    
+    // Eviction statistics
+    this.evictionStats = {
+      totalEvictions: 0,
+      proactiveEvictions: 0,
+      emergencyEvictions: 0,
+      lastEvictionCount: 0,
+      lastEvictionReason: 'none'
+    };
+    
     // SVDAG Deduplication Pool (Stage 7a)
     this.svdagPool = new Map();  // hash → {id, nodes, leaves, refCount}
     this.nextPoolId = 0;
     
-    // Adaptive eviction thresholds (for a game, not a map!)
-    this.evictionThresholds = [
-      60000,   // 1 minute (normal operation)
-      30000,   // 30 seconds (getting full)
-      15000,   // 15 seconds (very full)
-      10000,   // 10 seconds (critical)
-      5000     // 5 seconds (emergency)
-    ];
-    this.currentThresholdIndex = 0; // Start with 1 minute
+    // Protection settings
+    this.minChunkAgeMs = 2000;      // Don't evict chunks < 2 seconds old
+    this.cameraProtectionRadius = 3; // Never evict chunks within 3 chunks of camera
     
     // Statistics
     this.stats = {
@@ -251,7 +267,7 @@ export class ChunkManager {
           const poolEntry = this.svdagPool.get(hash);
           poolEntry.refCount++;
           poolId = poolEntry.id;
-          console.log(`♻️ Dedup: Chunk (${cx},${cy},${cz}) reuses Material SVDAG #${poolId} (${poolEntry.refCount} refs)`);
+          // Dedup (silent)
         } else {
           // NEW PATTERN! Add to pool
           poolId = this.nextPoolId++;
@@ -261,7 +277,7 @@ export class ChunkManager {
             leaves: chunkData.materialSVDAG.leaves,
             refCount: 1
           });
-          console.log(`🆕 New: Chunk (${cx},${cy},${cz}) adds Material SVDAG #${poolId}`);
+          // New SVDAG (silent)
         }
         
         // Store chunk data with SVDAG reference
@@ -365,10 +381,160 @@ export class ChunkManager {
   }
   
   /**
-   * Evict chunks using hybrid strategy:
-   * 1. Always evict chunks not seen for 10 minutes (stale data)
-   * 2. Primary: Distance-based eviction (far chunks)
-   * 3. Secondary: Under pressure (>80%), consider LRU within distance bands
+   * Proactive trim - runs every 5 seconds to keep cache from growing unbounded
+   */
+  proactiveTrim(cameraPos) {
+    const now = performance.now();
+    
+    // Check if enough time has passed since last trim
+    if (now - this.lastProactiveTrim < this.trimInterval) {
+      return 0;
+    }
+    
+    // Check cooldown (don't trim if we just did an emergency eviction)
+    if (now - this.lastEvictionTime < this.evictionCooldown) {
+      return 0;
+    }
+    
+    // Only trim if over soft limit
+    if (this.chunks.size <= this.softCacheLimit) {
+      this.lastProactiveTrim = now;
+      return 0;
+    }
+    
+    // Gentle trim to 90% of soft limit
+    const target = Math.floor(this.softCacheLimit * this.trimTargetRatio);
+    const toEvict = this.chunks.size - target;
+    
+    console.log(`⏰ Proactive trim triggered: ${this.chunks.size}/${this.softCacheLimit} chunks, target=${target}, toEvict=${toEvict}`);
+    
+    const evicted = this.evictByScore(cameraPos, toEvict, 'proactive');
+    
+    this.lastProactiveTrim = now;
+    this.lastEvictionTime = now;
+    this.evictionStats.proactiveEvictions += evicted;
+    this.evictionStats.totalEvictions += evicted;
+    this.evictionStats.lastEvictionCount = evicted;
+    this.evictionStats.lastEvictionReason = 'proactive';
+    
+    if (evicted > 0) {
+      console.log(`✅ Proactive trim: evicted ${evicted} chunks, now at ${this.chunks.size}`);
+    }
+    
+    return evicted;
+  }
+  
+  /**
+   * Emergency eviction - runs when hitting hard limit
+   */
+  emergencyEvict(cameraPos) {
+    // Emergency mode - no cooldown check
+    const target = Math.floor(this.softCacheLimit * this.emergencyTargetRatio);
+    const toEvict = this.chunks.size - target;
+    
+    if (toEvict <= 0) return 0;
+    
+    const evicted = this.evictByScore(cameraPos, toEvict, 'emergency');
+    
+    this.lastEvictionTime = performance.now();
+    this.evictionStats.emergencyEvictions += evicted;
+    this.evictionStats.totalEvictions += evicted;
+    this.evictionStats.lastEvictionCount = evicted;
+    this.evictionStats.lastEvictionReason = 'emergency';
+    
+    return evicted;
+  }
+  
+  /**
+   * Evict chunks by priority score
+   * Score = 60% time + 30% distance + 10% content
+   */
+  evictByScore(cameraPos, maxToEvict, reason = 'unknown') {
+    if (!cameraPos) {
+      console.warn('⚠️ No camera position for eviction!');
+      return 0;
+    }
+    
+    const now = Date.now();
+    const camChunk = this.worldToChunk(cameraPos[0], cameraPos[1], cameraPos[2]);
+    
+    // Limit evictions per call (except manual)
+    const toEvict = reason === 'manual' ? maxToEvict : Math.min(maxToEvict, this.maxEvictionsPerFrame);
+    
+    // Score all chunks
+    const scored = [];
+    for (const [key, chunk] of this.chunks.entries()) {
+      // Fix invalid timestamps
+      if (!chunk.lastSeenFrame || typeof chunk.lastSeenFrame !== 'number' || chunk.lastSeenFrame < 1000) {
+        chunk.lastSeenFrame = now;
+        continue;
+      }
+      
+      const age = now - chunk.lastSeenFrame;
+      
+      // Protection: Never evict recent chunks
+      if (age < this.minChunkAgeMs) {
+        continue;
+      }
+      
+      // Protection: Never evict chunks near camera
+      const dx = chunk.cx - camChunk.cx;
+      const dy = chunk.cy - camChunk.cy;
+      const dz = chunk.cz - camChunk.cz;
+      const distance = Math.sqrt(dx*dx + dy*dy + dz*dz);
+      
+      if (distance <= this.cameraProtectionRadius) {
+        continue; // Too close to camera
+      }
+      
+      // Calculate eviction score (higher = evict first)
+      const MAX_AGE = 300000; // 5 minutes
+      const MAX_DISTANCE = 20; // 20 chunks
+      
+      const timeScore = Math.min(age / MAX_AGE, 1.0);
+      const distScore = Math.min(distance / MAX_DISTANCE, 1.0);
+      const contentScore = 1.0; // TODO: Use chunk density if available
+      
+      const score = (0.6 * timeScore) + (0.3 * distScore) + (0.1 * (1.0 - contentScore));
+      
+      scored.push({ key, chunk, score, age, distance });
+    }
+    
+    // Sort by score (highest first)
+    scored.sort((a, b) => b.score - a.score);
+    
+    // Evict worst chunks
+    let evicted = 0;
+    for (let i = 0; i < Math.min(toEvict, scored.length); i++) {
+      const {key, chunk} = scored[i];
+      
+      // Decrement SVDAG refcount
+      if (chunk.svdagHash) {
+        const poolEntry = this.svdagPool.get(chunk.svdagHash);
+        if (poolEntry) {
+          poolEntry.refCount--;
+          if (poolEntry.refCount === 0) {
+            this.svdagPool.delete(chunk.svdagHash);
+          }
+        }
+      }
+      
+      this.chunks.delete(key);
+      evicted++;
+    }
+    
+    // Log eviction details for debugging
+    if (reason === 'manual' || evicted > 0) {
+      const protectedCount = this.chunks.size - scored.length;
+      console.log(`🗑️ Eviction [${reason}]: wanted=${toEvict}, candidates=${scored.length}, protected=${protectedCount}, evicted=${evicted}`);
+    }
+    
+    return evicted;
+  }
+
+  /**
+   * LEGACY: Evict chunks using hybrid strategy - REPLACED BY DUAL SYSTEM
+   * Kept for backwards compatibility
    */
   evictOldChunks(cameraPos = null) {
     if (!cameraPos) {
@@ -543,17 +709,29 @@ export class ChunkManager {
   }
 
   /**
-   * Get memory pressure (0.0 = plenty of room, 1.0 = at limit)
+   * Get memory pressure (0.0 = plenty of room, 1.0 = at hard limit)
    */
   getMemoryPressure() {
-    return Math.min(1.0, this.chunks.size / this.maxCachedChunks);
+    return Math.min(1.0, this.chunks.size / this.hardCacheLimit);
   }
-
+  
   /**
-   * Get current eviction threshold in seconds
+   * Get cache status for HUD display
    */
-  getCurrentEvictionThreshold() {
-    return this.evictionThresholds[this.currentThresholdIndex] / 1000;
+  getCacheStatus() {
+    const size = this.chunks.size;
+    const softPercent = (size / this.softCacheLimit * 100).toFixed(1);
+    const hardPercent = (size / this.hardCacheLimit * 100).toFixed(1);
+    
+    return {
+      size,
+      softLimit: this.softCacheLimit,
+      hardLimit: this.hardCacheLimit,
+      softPercent: parseFloat(softPercent),
+      hardPercent: parseFloat(hardPercent),
+      pressure: this.getMemoryPressure(),
+      ...this.evictionStats
+    };
   }
 
   /**

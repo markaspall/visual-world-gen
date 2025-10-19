@@ -225,7 +225,7 @@ export class ChunkedSvdagRenderer {
     
     // Create placeholder buffers (will be updated when chunks load)
     this.chunkMetadataBuffer = this.device.createBuffer({
-      size: 1024 * 192, // 600 chunks max (32 bytes per chunk * 600 = 19.2KB)
+      size: 25000 * 32, // 25K chunks max (32 bytes per chunk = 800KB)
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
     });
     
@@ -240,7 +240,7 @@ export class ChunkedSvdagRenderer {
     });
     
     this.chunkHashTableBuffer = this.device.createBuffer({
-      size: 8192 * 4, // 32KB for hash table (8192 u32 entries)
+      size: 65536 * 4, // 256KB for hash table (64K u32 entries)
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
     });
     
@@ -321,7 +321,7 @@ export class ChunkedSvdagRenderer {
     // Setup input handlers
     this.setupInput();
     
-    console.log('✅ Renderer initialized - Press 0-9 for debug modes (avoid 2,3)');
+    console.log('✅ Renderer initialized - Press 0-9 for debug modes, E to force eviction, L to dump state');
     
     // Create debug HUD
     this.createDebugHUD();
@@ -462,10 +462,8 @@ export class ChunkedSvdagRenderer {
   updateDebugHUD() {
     if (!this.debugHUD) return;
     
-    const chunks = this.chunkManager.chunks.size;
-    const softLimit = Math.floor(this.chunkManager.maxCachedChunks * 0.6);  // 60% soft limit
-    const pressure = (chunks / softLimit * 100).toFixed(1);  // Show pressure relative to soft limit
-    const threshold = this.chunkManager.getCurrentEvictionThreshold();
+    const cacheStatus = this.chunkManager.getCacheStatus();
+    const chunks = cacheStatus.size;
     const pos = this.camera.position;
     const camChunk = this.chunkManager.worldToChunk(pos[0], pos[1], pos[2]);
     
@@ -500,14 +498,18 @@ export class ChunkedSvdagRenderer {
       <div><b>FPS:</b> ${this.fps.toFixed(1)}</div>
       <div><b>Frame:</b> ${this.frameCount}</div>
       <div><b>Mode:</b> ${modeName} (${this.debugMode})</div>
-      <div style="margin-top: 6px; color: #ff0; font-weight: bold;">📦 Chunks</div>
-      <div><b>Loaded:</b> ${chunks}/${softLimit} (max ${this.chunkManager.maxCachedChunks})</div>
+      <div style="margin-top: 6px; color: #ff0; font-weight: bold;">📦 Chunk Cache</div>
+      <div><b>Loaded:</b> ${chunks}/${cacheStatus.softLimit} <span style="color:#888">(hard: ${cacheStatus.hardLimit})</span></div>
       <div><b>On GPU:</b> ${this.uploadedChunkCount}</div>
-      <div><b>Pressure:</b> <span style="color:${pressure > 100 ? '#f00' : pressure > 80 ? '#f80' : '#0f0'}">${pressure}%</span></div>
-      <div><b>Eviction:</b> ${pressure > 133 ? '<span style="color:#f80">distance+LRU</span>' : pressure > 100 ? 'distance' : 'none'}</div>
-      <div><b>Evicted (frame):</b> <span style="color:${this.evictedThisFrame > 0 ? '#f80' : '#0f0'}">${this.evictedThisFrame}</span></div>
-      <div><b>Evicted (total):</b> ${this.totalEvicted}</div>
-      <div><b>Chunk misses:</b> <span style="color:${this.cacheHitsThisFrame > 0 ? '#f80' : '#0f0'}">${this.cacheHitsThisFrame}</span> / ${this.totalCacheHits}</div>
+      <div><b>Soft fill:</b> <span style="color:${cacheStatus.softPercent > 100 ? '#f00' : cacheStatus.softPercent > 80 ? '#f80' : '#0f0'}">${cacheStatus.softPercent}%</span></div>
+      <div><b>Hard fill:</b> <span style="color:${cacheStatus.hardPercent > 95 ? '#f00' : cacheStatus.hardPercent > 80 ? '#f80' : '#0f0'}">${cacheStatus.hardPercent}%</span></div>
+      <div style="margin-top: 4px; color: #f80; font-weight: bold;">🗑️ Eviction</div>
+      <div><b>Strategy:</b> <span style="color:#0ff">${cacheStatus.lastEvictionReason}</span></div>
+      <div><b>This frame:</b> <span style="color:${this.evictedThisFrame > 0 ? '#f80' : '#0f0'}">${this.evictedThisFrame}</span></div>
+      <div><b>Proactive:</b> ${cacheStatus.proactiveEvictions}</div>
+      <div><b>Emergency:</b> <span style="color:${cacheStatus.emergencyEvictions > 0 ? '#f00' : '#0f0'}">${cacheStatus.emergencyEvictions}</span></div>
+      <div><b>Total:</b> ${cacheStatus.totalEvictions}</div>
+      <div style="margin-top: 4px; color: #888;">Chunk misses: ${this.cacheHitsThisFrame} / ${this.totalCacheHits}</div>
       <div><b>Range:</b> ${chunkRange}</div>
       <div><b>Max distance:</b> <span style="color:${this.adaptiveMaxDistance < 2048 ? '#f80' : '#0f0'}">${this.adaptiveMaxDistance || 2048}</span></div>
       <div><b>Max chunk steps:</b> <span style="color:${this.adaptiveMaxChunkSteps < 128 ? '#f80' : '#0f0'}">${this.adaptiveMaxChunkSteps || 128}</span></div>
@@ -584,6 +586,9 @@ export class ChunkedSvdagRenderer {
           break;
         case 'KeyL':
           this.dumpBufferState();
+          break;
+        case 'KeyE':
+          this.forceEviction();
           break;
         case 'Escape':
           document.exitPointerLock();
@@ -762,6 +767,38 @@ export class ChunkedSvdagRenderer {
     } else {
       console.log('✅ All nearby chunks loaded!');
     }
+    
+    console.log('═══════════════════════════════════════');
+  }
+
+  forceEviction() {
+    console.log('═══════════════════════════════════════');
+    console.log('🗑️ FORCE EVICTION (E key)');
+    console.log('═══════════════════════════════════════');
+    
+    const beforeCount = this.chunkManager.chunks.size;
+    const cacheStatus = this.chunkManager.getCacheStatus();
+    
+    console.log(`📊 Before: ${beforeCount} chunks (${cacheStatus.softPercent.toFixed(1)}% soft, ${cacheStatus.hardPercent.toFixed(1)}% hard)`);
+    
+    // Force evict 1000 chunks
+    const toEvict = Math.min(1000, beforeCount - 100); // Keep at least 100 chunks
+    if (toEvict <= 0) {
+      console.warn('⚠️ Not enough chunks to evict!');
+      console.log('═══════════════════════════════════════');
+      return;
+    }
+    
+    const evicted = this.chunkManager.evictByScore(this.camera.position, toEvict, 'manual');
+    const afterCount = this.chunkManager.chunks.size;
+    const afterStatus = this.chunkManager.getCacheStatus();
+    
+    console.log(`🗑️ Evicted: ${evicted} chunks`);
+    console.log(`📊 After: ${afterCount} chunks (${afterStatus.softPercent.toFixed(1)}% soft, ${afterStatus.hardPercent.toFixed(1)}% hard)`);
+    console.log('✅ Re-uploading to GPU...');
+    
+    // Force GPU re-upload
+    this.uploadChunksToGPU();
     
     console.log('═══════════════════════════════════════');
   }
@@ -1213,14 +1250,11 @@ export class ChunkedSvdagRenderer {
       
       this.stableFrames = 0;
       
-      // Log if: big change (>50 chunks) OR 5 seconds passed
-      const shouldLog = requestChange > 50 || timeSinceLog > 5000;
+      // Log if: huge change (>500 chunks) OR 30 seconds passed
+      const shouldLog = requestChange > 500 || timeSinceLog > 30000;
       
-      if (shouldLog || requested.length <= 10) {
-        const reqStr = requested.length <= 5 
-          ? requested.map(r => `(${r.cx},${r.cy},${r.cz})`).join(', ')
-          : `${requested.length} chunks`;
-        console.log(`📦 ${reqStr}, ${this.chunkManager.chunks.size}/${this.chunkManager.maxCachedChunks} loaded`);
+      if (shouldLog) {
+        console.log(`📦 ${requested.length} chunks requested, ${this.chunkManager.chunks.size}/${this.chunkManager.maxCachedChunks} loaded`);
         this.lastLogTime = now;
       }
       
@@ -1278,7 +1312,7 @@ export class ChunkedSvdagRenderer {
       const desync = memoryCount !== this.uploadedChunkCount;
       
       if (loaded > 0 || desync) {
-        if (loaded > 0) {
+        if (loaded > 100) {  // Only log very significant loads
           console.log(`🔄 Loaded ${loaded} new chunks (total: ${memoryCount})`);
         }
         if (desync && loaded === 0) {
@@ -1287,11 +1321,21 @@ export class ChunkedSvdagRenderer {
         this.uploadChunksToGPU();
       }
       
-      // Eviction: Hybrid strategy (distance + LRU under pressure + stale cleanup)
+      // Eviction: Dual system (proactive + emergency)
       // Run AFTER upload so lastSeenFrame is fresh
-      const evicted = this.chunkManager.evictOldChunks(this.camera.position);
-      this.evictedThisFrame = evicted;
-      this.totalEvicted += evicted;
+      
+      // Proactive trim (every 5 seconds if over soft limit)
+      const proactiveEvicted = this.chunkManager.proactiveTrim(this.camera.position);
+      
+      // Emergency eviction (if over hard limit)
+      let emergencyEvicted = 0;
+      if (this.chunkManager.chunks.size > this.chunkManager.hardCacheLimit) {
+        emergencyEvicted = this.chunkManager.emergencyEvict(this.camera.position);
+      }
+      
+      const totalEvicted = proactiveEvicted + emergencyEvicted;
+      this.evictedThisFrame = totalEvicted;
+      this.totalEvicted += totalEvicted;
     } finally {
       this.isProcessingRequests = false;
     }
@@ -1306,7 +1350,7 @@ export class ChunkedSvdagRenderer {
   }
 
   buildChunkHashTable(chunks) {
-    const HASH_TABLE_SIZE = 8192;
+    const HASH_TABLE_SIZE = 65536; // 64K slots for 25K chunks (load factor ~0.4)
     const hashTable = new Uint32Array(HASH_TABLE_SIZE);
     hashTable.fill(0xFFFFFFFF);  // Empty marker
     
@@ -1317,12 +1361,12 @@ export class ChunkedSvdagRenderer {
       
       // Linear probing to find empty slot
       let probes = 0;
-      while (hashTable[slot] !== 0xFFFFFFFF && probes < 32) {
+      while (hashTable[slot] !== 0xFFFFFFFF && probes < 64) {
         slot = (slot + 1) % HASH_TABLE_SIZE;
         probes++;
       }
       
-      if (probes < 32) {
+      if (probes < 64) {
         hashTable[slot] = i;  // Store chunk index
       } else {
         console.warn(`⚠️ Hash table full! Couldn't insert chunk (${chunk.cx},${chunk.cy},${chunk.cz})`);
@@ -1400,15 +1444,12 @@ export class ChunkedSvdagRenderer {
     const afterNonZero = Array.from(this.metaGrid).filter(v => v !== 0).length;
     const afterBadValues = Array.from(this.metaGrid).filter(v => v !== 0 && v !== 1);
     
-    if (this.frameCount < 60 || this.frameCount % 60 === 0) {
-      console.log(`🗺️ META-GRID BUILD [F${this.frameCount}]: ${markedChunks}/${chunks.length} chunks → ${solidCount} meta-chunks, before=${beforeNonZero}/${beforeBadValues.length} bad, after=${afterNonZero}/${afterBadValues.length} bad`);
-      
-      if (beforeBadValues.length > 0) {
-        console.error(`❌ BAD VALUES BEFORE BUILD:`, beforeBadValues.slice(0, 10));
-      }
-      if (afterBadValues.length > 0) {
-        console.error(`❌ BAD VALUES AFTER BUILD:`, afterBadValues.slice(0, 10));
-      }
+    // Only log meta-grid errors, not regular builds
+    if (beforeBadValues.length > 0) {
+      console.error(`❌ BAD META-GRID VALUES BEFORE BUILD:`, beforeBadValues.slice(0, 10));
+    }
+    if (afterBadValues.length > 0) {
+      console.error(`❌ BAD META-GRID VALUES AFTER BUILD:`, afterBadValues.slice(0, 10));
     }
   }
 
@@ -1421,19 +1462,15 @@ export class ChunkedSvdagRenderer {
       return;
     }
     
-    // Update lastSeenFrame for all chunks being uploaded (they're actively rendered)
+    // NOTE: lastSeenFrame is updated ONLY for requested chunks in processChunkRequests()
+    // DO NOT update timestamps here - that defeats the eviction system!
+    // Only validate that timestamps exist
     const now = Date.now();
-    let updatedCount = 0;
     for (const chunk of chunks) {
-      const oldTimestamp = chunk.lastSeenFrame;
-      chunk.lastSeenFrame = now;  // Direct update works (arrays contain references)
-      if (oldTimestamp < 1000 || !oldTimestamp) {
-        console.warn(`⚠️ Chunk (${chunk.cx},${chunk.cy},${chunk.cz}) had bad timestamp ${oldTimestamp}, fixed to ${now}`);
+      if (!chunk.lastSeenFrame || chunk.lastSeenFrame < 1000) {
+        // Fix broken timestamps (one-time fix)
+        chunk.lastSeenFrame = now - 10000;  // Start with 10s age so it can be evicted if not used
       }
-      updatedCount++;
-    }
-    if (this.frameCount % 300 === 0 && updatedCount > 0) {
-      console.log(`✅ Updated lastSeenFrame for ${updatedCount} chunks`);
     }
     
     // CRITICAL: Track uploaded count for render() to use
@@ -1442,57 +1479,15 @@ export class ChunkedSvdagRenderer {
     const countChanged = oldCount !== this.uploadedChunkCount;
     this.lastUploadCount = chunks.length;
     
-    if (countChanged || this.frameCount % 300 === 0) {
-      const sample = chunks.slice(0, 5).map(c => `(${c.cx},${c.cy},${c.cz})`).join(', ');
+    // Only log major upload changes (>500 chunks)
+    if (countChanged && Math.abs(chunks.length - oldCount) > 500) {
       const minY = Math.min(...chunks.map(c => c.cy));
       const maxY = Math.max(...chunks.map(c => c.cy));
       const yLevels = new Set(chunks.map(c => c.cy)).size;
-      console.log(`📤 GPU Upload: ${chunks.length} chunks | Y:${minY}..${maxY} (${yLevels} levels) | First 5: ${sample} (sorted!)`);
+      console.log(`📤 GPU Upload: ${chunks.length} chunks | Y:${minY}..${maxY} (${yLevels} levels)`);
     }
     
-    // Log detailed info periodically
-    if (chunks.length > 0 && this.frameCount % 120 === 0) {
-      const camChunk = this.chunkManager.worldToChunk(this.camera.position[0], this.camera.position[1], this.camera.position[2]);
-      
-      const c = chunks[0];
-      console.log(`🔍 First chunk detail:`, {
-        coords: `(${c.cx}, ${c.cy}, ${c.cz})`,
-        worldOffset: [c.cx * 32, c.cy * 32, c.cz * 32],
-        matNodes: c.materialSVDAG?.nodes?.length || 0,
-        matLeaves: c.materialSVDAG?.leaves?.length || 0,
-        opqNodes: c.opaqueSVDAG?.nodes?.length || 0,
-        opqLeaves: c.opaqueSVDAG?.leaves?.length || 0,
-        matRootIdx: c.materialSVDAG?.rootIdx,
-        opqRootIdx: c.opaqueSVDAG?.rootIdx
-      });
-      
-      // Count chunks per Y level and check for empty chunks
-      const chunksPerY = {};
-      let emptyCount = 0;
-      let atCameraY = 0;
-      
-      chunks.forEach(ch => {
-        chunksPerY[ch.cy] = (chunksPerY[ch.cy] || 0) + 1;
-        if (ch.cy === camChunk.cy) atCameraY++;
-        // Check if chunk is empty (no voxels)
-        const isEmpty = (ch.opaqueSVDAG?.nodes?.length || 0) === 0 && 
-                       (ch.materialSVDAG?.nodes?.length || 0) === 0;
-        if (isEmpty) emptyCount++;
-      });
-      
-      console.log(`📊 Chunks per Y level:`, chunksPerY);
-      console.log(`📍 Camera chunk: (${camChunk.cx}, ${camChunk.cy}, ${camChunk.cz})`);
-      console.warn(`⚠️ Only ${atCameraY}/${chunks.length} chunks at camera Y=${camChunk.cy} | Missing ${chunks.length - atCameraY} chunks!`);
-      
-      if (emptyCount > 0) {
-        console.warn(`⚠️ ${emptyCount}/${chunks.length} chunks are EMPTY (all air)!`);
-      }
-      
-      // Sample some chunks near camera Y to see what's loaded
-      const nearCameraY = chunks.filter(ch => Math.abs(ch.cy - camChunk.cy) <= 1);
-      console.log(`🎯 Chunks within ±1 Y of camera (Y=${camChunk.cy}): ${nearCameraY.length} | Sample:`, 
-        nearCameraY.slice(0, 10).map(ch => `(${ch.cx},${ch.cy},${ch.cz})`).join(', '));
-    }
+    // Detailed logging disabled - use debug commands instead (window.debugChunks)
     
     // Validate all chunks have valid positions
     let invalidCount = 0;
@@ -1600,50 +1595,7 @@ export class ChunkedSvdagRenderer {
       console.error(`❌ GPU BUFFER SIZE WRONG! Buffer is ${this.metaGridBuffer.size} bytes, should be ${expectedBytes} bytes`);
     }
     
-    // SMOKING GUN TEST: Read back values around where chunks should be (indices 2190-2210)
-    // Chunks near (0,4,0) map to meta-index ~2200
-    if (this.frameCount >= 20 && this.frameCount <= 25 && !this.metaGridReadbackDone) {
-      this.metaGridReadbackDone = true;
-      
-      console.log(`🔬 Starting GPU readback at frame ${this.frameCount}...`);
-      
-      const startIndex = 2190;  // Check around where (0,4,0) chunks should map
-      const count = 20;
-      const readBuffer = this.device.createBuffer({
-        size: count * 4, // 20 u32 values = 80 bytes
-        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
-      });
-      
-      const commandEncoder = this.device.createCommandEncoder();
-      commandEncoder.copyBufferToBuffer(this.metaGridBuffer, startIndex * 4, readBuffer, 0, count * 4);
-      this.device.queue.submit([commandEncoder.finish()]);
-      
-      // Read back asynchronously
-      readBuffer.mapAsync(GPUMapMode.READ).then(() => {
-        const data = new Uint32Array(readBuffer.getMappedRange());
-        const values = Array.from(data);
-        console.log(`🔬 GPU READBACK [F${this.frameCount}]: Values at indices [${startIndex}-${startIndex+count-1}]:`, values);
-        
-        // Also log which JS values should be there
-        const jsValues = Array.from(this.metaGrid.slice(startIndex, startIndex + count));
-        console.log(`📋 JavaScript array at same indices:`, jsValues);
-        
-        const badGPU = values.filter(v => v !== 0 && v !== 1);
-        if (badGPU.length > 0) {
-          console.error(`❌ GPU HAS CORRUPT DATA! Found ${badGPU.length} bad values:`, badGPU);
-        } else {
-          // Check if JS and GPU match
-          const matches = values.every((v, i) => v === jsValues[i]);
-          if (matches) {
-            console.log(`✅ GPU data MATCHES JavaScript! Upload is working correctly!`);
-          } else {
-            console.error(`❌ GPU data DIFFERS from JavaScript! Upload or buffer issue!`);
-          }
-        }
-        readBuffer.unmap();
-        readBuffer.destroy();
-      });
-    }
+    // GPU readback debug code removed - was one-time validation
     
     // DEBUG: Verify AFTER upload
     const afterUpload = [];
