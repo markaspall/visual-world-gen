@@ -668,6 +668,27 @@ fn shade(hit: Hit, ray_origin: vec3<f32>, ray_dir: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(0.0, 1.0, 0.0) * (0.5 + activity * 0.5); // Green = found
   }
   
+  // Debug mode 9: Transparency layers (shows transparent vs solid)
+  if (renderParams.debug_mode == 9u) {
+    if (hit.distance < 0.0) {
+      return vec3<f32>(0.0, 0.0, 0.0); // Black = miss
+    }
+    if (hit.block_id == 0u) {
+      return vec3<f32>(0.5, 0.5, 0.5); // Gray = air
+    }
+    let material = materials[hit.block_id];
+    if (material.transparent > 0.5) {
+      // Transparent = cyan (water) or white (air/glass)
+      if (hit.block_id == 6u) {
+        return vec3<f32>(0.0, 0.0, 1.0); // Blue = water specifically
+      }
+      return vec3<f32>(0.0, 1.0, 1.0); // Cyan = other transparent
+    } else {
+      // Solid = green
+      return vec3<f32>(0.0, 1.0, 0.0);
+    }
+  }
+  
   // Debug mode 10: Meta-Skip efficiency (shows how many chunks were skipped)
   if (renderParams.debug_mode == 10u) {
     if (hit.chunk_steps == 0u) {
@@ -687,101 +708,147 @@ fn shade(hit: Hit, ray_origin: vec3<f32>, ray_dir: vec3<f32>) -> vec3<f32> {
     return color;
   }
   
-  // Normal rendering - SINGLE DAG WITH CHANGE DETECTION
+  // Normal rendering - MULTI-LAYER TRANSPARENCY SYSTEM
   
-  // Track material changes for transparency effects
-  var final_hit = hit;
-  var transparent_depth = 0.0;
-  var has_transparent = false;
-  var transparent_material: BlockMaterial;
+  var accumulated_color = vec3<f32>(0.0);
+  var accumulated_alpha = 0.0;
+  var current_ray_origin = ray_origin;
+  var current_distance = 0.0;
+  var current_hit = hit;
+  var layers_processed = 0u;
+  const MAX_TRANSPARENCY_LAYERS = 8u;
   
-  // Check if first hit is transparent
-  if (hit.block_id > 0u && hit.block_id <= 15u) {
-    let hit_material = materials[hit.block_id];
+  // Process multiple transparent layers
+  while (layers_processed < MAX_TRANSPARENCY_LAYERS && accumulated_alpha < 0.99) {
+    layers_processed++;
     
-    // If we hit transparent material, continue to find what's beneath/behind
+    // Check if we hit anything
+    if (current_hit.distance < 0.0) {
+      // Hit nothing (out of world) - add sky contribution and done
+      let t = ray_dir.y * 0.5 + 0.5;
+      let sky_color = mix(vec3<f32>(0.5, 0.7, 1.0), vec3<f32>(0.1, 0.3, 0.8), t);
+      accumulated_color += sky_color * (1.0 - accumulated_alpha);
+      accumulated_alpha = 1.0;
+      break;
+    }
+    
+    // Get material (including air at block_id 0)
+    if (current_hit.block_id > 15u) {
+      break;  // Invalid material
+    }
+    
+    let hit_material = materials[current_hit.block_id];
+    
+    // Check if material is transparent (including air)
     if (hit_material.transparent > 0.5) {
-      has_transparent = true;
-      transparent_material = hit_material;
-      let transparent_start = hit.distance;
+      // TRANSPARENT LAYER - accumulate and continue
+      var layer_color = vec3<f32>(hit_material.colorR, hit_material.colorG, hit_material.colorB);
       
-      // Continue ray from just past transparent surface
-      let continue_pos = ray_origin + ray_dir * (hit.distance + 0.1);
+      // Material properties drive everything
+      let base_transparency = hit_material.transparent;  // 0.0 = opaque, 1.0 = fully transparent
       
-      // Keep raymarching to find next material change (solid or different transparent)
-      let next_hit = raymarchChunks(continue_pos, ray_dir);
+      // Derive rendering coefficients from transparency value
+      // More transparent = lighter color, less alpha accumulation
+      let transparency_factor = base_transparency;  // 0.8 for water, 0.95 for glass, etc.
+      let color_brightness = 1.0 + (transparency_factor * 0.5);  // More transparent = brighter (1.0-1.5x)
+      let tint_strength = 1.0 - transparency_factor;  // More transparent = less tint (0.2 for water, 0.05 for glass)
+      let alpha_buildup = 1.0 - (transparency_factor * 0.8);  // More transparent = less buildup
       
-      if (next_hit.block_id > 0u && next_hit.distance >= 0.0) {
-        // Found something beneath/behind transparent material
-        final_hit = next_hit;
-        final_hit.distance = hit.distance + next_hit.distance + 0.1;
-        transparent_depth = next_hit.distance; // Distance through transparent
-      } else {
-        // Nothing found - looking into infinite transparent (deep water/glass)
-        final_hit = hit;
-        transparent_depth = 100.0;
+      layer_color = layer_color * color_brightness;
+      
+      // Calculate opacity for this layer (based on distance through it)
+      // March through ALL of the same transparent material, not just one voxel
+      let layer_entry = current_distance + current_hit.distance;
+      let entry_pos = current_ray_origin + ray_dir * (current_hit.distance + 0.05);
+      var march_pos = entry_pos;
+      var layer_thickness = 0.0;
+      let current_material_id = current_hit.block_id;
+      
+      // Keep marching until we hit a DIFFERENT material or nothing
+      var march_iterations = 0u;
+      const MAX_MARCH = 32u;  // Safety limit
+      var next_hit: Hit;
+      next_hit.distance = -1.0;
+      next_hit.block_id = 0u;
+      
+      loop {
+        if (march_iterations >= MAX_MARCH) {
+          layer_thickness = 100.0;  // Treat as infinite
+          next_hit.distance = -1.0;
+          next_hit.block_id = 0u;
+          break;
+        }
+        march_iterations++;
+        
+        let march_hit = raymarchChunks(march_pos, ray_dir);
+        
+        if (march_hit.distance < 0.0) {
+          // Hit nothing (out of world bounds) - infinite transparent
+          layer_thickness = 100.0;
+          next_hit = march_hit;
+          break;
+        }
+        
+        layer_thickness += march_hit.distance;
+        
+        // Check if we hit a different material (including air if we're not already in air)
+        if (march_hit.block_id != current_material_id) {
+          // Different material found - this is the next hit after transparent layer
+          next_hit = march_hit;
+          break;
+        }
+        
+        // Same material - keep marching through it
+        march_pos = march_pos + ray_dir * (march_hit.distance + 0.05);
       }
-    }
-  }
-  
-  // Sky background
-  if (final_hit.distance < 0.0 || final_hit.block_id == 0u) {
-    let t = ray_dir.y * 0.5 + 0.5;
-    var sky_color = mix(vec3<f32>(0.5, 0.7, 1.0), vec3<f32>(0.1, 0.3, 0.8), t);
-    
-    // If we're looking through transparent material at sky
-    if (has_transparent) {
-      let trans_color = vec3<f32>(transparent_material.colorR, transparent_material.colorG, transparent_material.colorB);
-      let trans_fog = clamp(transparent_depth * 0.02, 0.0, 0.9);
-      sky_color = mix(sky_color, trans_color * 0.3, trans_fog);
-    }
-    
-    return sky_color;
-  }
-  
-  // Get material color
-  var base_color = vec3<f32>(0.3, 0.8, 0.3); // Default green
-  
-  if (final_hit.block_id > 0u && final_hit.block_id <= 15u) {
-    let mat = materials[final_hit.block_id];
-    let mat_color = vec3<f32>(mat.colorR, mat.colorG, mat.colorB);
-    let color_brightness = mat_color.r + mat_color.g + mat_color.b;
-    
-    if (color_brightness > 0.1) {
-      base_color = mat_color;
+      
+      // Calculate transparency falloff through layer
+      // More distance = more opaque, scaled by material transparency
+      let distance_factor = layer_thickness * (1.0 - transparency_factor) * 0.05;  // Material-driven falloff
+      let distance_opacity = 1.0 - pow(base_transparency, distance_factor);
+      let layer_alpha = clamp(distance_opacity, 0.02, 0.95);  // Wide range
+      
+      // Accumulate this layer's contribution (material-driven)
+      let layer_contribution = layer_color * layer_alpha * (1.0 - accumulated_alpha);
+      accumulated_color += layer_contribution * tint_strength;  // Material drives tint strength
+      accumulated_alpha += layer_alpha * (1.0 - accumulated_alpha) * alpha_buildup;  // Material drives buildup
+      
+      // Continue from exit point (march_pos is now at the end of this material layer)
+      current_ray_origin = march_pos;
+      current_distance = layer_entry + layer_thickness;
+      current_hit = next_hit;
     } else {
-      // Generate color from block_id
-      let id_f = f32(final_hit.block_id);
-      base_color = vec3<f32>(
-        0.3 + (id_f * 0.23) % 0.7,
-        0.3 + (id_f * 0.37) % 0.7,
-        0.3 + (id_f * 0.51) % 0.7
-      );
+      // SOLID LAYER - render and done
+      let solid_color = vec3<f32>(hit_material.colorR, hit_material.colorG, hit_material.colorB);
+      
+      // Get material color with fallback
+      var base_color = solid_color;
+      let color_brightness = solid_color.r + solid_color.g + solid_color.b;
+      if (color_brightness < 0.1) {
+        let id_f = f32(current_hit.block_id);
+        base_color = vec3<f32>(
+          0.3 + (id_f * 0.23) % 0.7,
+          0.3 + (id_f * 0.37) % 0.7,
+          0.3 + (id_f * 0.51) % 0.7
+        );
+      }
+      
+      // Lighting
+      let light_dir = normalize(vec3<f32>(0.5, 1.0, 0.3));
+      let ndotl = max(dot(current_hit.normal, light_dir), 0.0);
+      let ambient = 0.4;
+      let diffuse = ndotl * 0.6;
+      let lit_color = base_color * (ambient + diffuse);
+      
+      // Add solid contribution
+      accumulated_color += lit_color * (1.0 - accumulated_alpha);
+      accumulated_alpha = 1.0;
+      break;
     }
   }
   
-  // Simple lighting
-  let light_dir = normalize(vec3<f32>(0.5, 1.0, 0.3));
-  let ndotl = max(dot(final_hit.normal, light_dir), 0.0);
-  let ambient = 0.4;
-  let diffuse = ndotl * 0.6;
-  
-  var final_color = base_color * (ambient + diffuse);
-  
-  // Apply transparent effects if we're looking through transparent material
-  if (has_transparent && transparent_depth > 0.0) {
-    let trans_color = vec3<f32>(transparent_material.colorR, transparent_material.colorG, transparent_material.colorB);
-    let deep_trans = trans_color * 0.3;
-    
-    // Fog based on distance through transparent material
-    let trans_fog = clamp(transparent_depth * 0.03, 0.0, 0.85);
-    final_color = mix(final_color, deep_trans, trans_fog);
-    
-    // Add color tint
-    final_color = mix(final_color, final_color * trans_color * 1.5, 0.3);
-  }
-  
-  return final_color;
+  // Return accumulated result
+  return accumulated_color;
 }
 
 @compute @workgroup_size(8, 8)

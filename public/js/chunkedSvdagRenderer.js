@@ -253,7 +253,7 @@ export class ChunkedSvdagRenderer {
     // Zero out the buffer
     new Uint32Array(this.metaGridBuffer.getMappedRange()).fill(0);
     this.metaGridBuffer.unmap();
-    console.log('✅ Meta-grid buffer initialized to zeros');
+    // Meta-grid buffer initialized
     
     // Create pipeline
     const shaderModule = this.device.createShaderModule({ code: shaderCode });
@@ -355,7 +355,7 @@ export class ChunkedSvdagRenderer {
       },
       renderer: this
     };
-    console.log('💡 Debug commands: window.debugRenderer.inspectChunk(cx,cy,cz), window.debugRenderer.listChunks()');
+    // Debug commands available
   }
   
   createDebugHUD() {
@@ -413,7 +413,7 @@ export class ChunkedSvdagRenderer {
       <div><b>6</b> - Chunks</div>
       <div><b>7</b> - Memory</div>
       <div><b>8</b> - DAG</div>
-      <div><b>9</b> - Freeze chunks</div>
+      <div><b>9</b> - Transparency test</div>
       <div><b>-</b> - Skip efficiency</div>
       <div style="margin-top: 8px; color: #0ff; font-weight: bold;">⚡ Optimizations</div>
       <div><b>M</b> - Toggle Meta-Skip</div>
@@ -469,7 +469,7 @@ export class ChunkedSvdagRenderer {
     const pos = this.camera.position;
     const camChunk = this.chunkManager.worldToChunk(pos[0], pos[1], pos[2]);
     
-    const debugModeNames = ['Normal', 'Depth', '??', '??', 'Normals', 'Chunk Steps', 'Chunks', 'Memory', 'DAG', 'Freeze', 'Skip Efficiency'];
+    const debugModeNames = ['Normal', 'Depth', '??', '??', 'Normals', 'Chunk Steps', 'Chunks', 'Memory', 'DAG', 'Transparency', 'Skip Efficiency'];
     const modeName = debugModeNames[this.debugMode] || 'Unknown';
     
     // Find min/max loaded chunks to show range
@@ -543,44 +543,44 @@ export class ChunkedSvdagRenderer {
       switch (e.code) {
         case 'Digit9':
           this.debugMode = 9;
-          console.log('🎨 Debug: FREEZE CHUNKS');
+          // Transparency test mode
           break;
         case 'Minus':
         case 'NumpadSubtract':
           this.debugMode = 10;
-          console.log('🎨 Debug: META-SKIP EFFICIENCY (green=many skips, red=no skips)');
+          // Meta-skip efficiency mode
           break;
         case 'KeyM':
           this.metaSkipEnabled = !this.metaSkipEnabled;
-          console.log(`🗺️ Meta-SVDAG Skip: ${this.metaSkipEnabled ? 'ENABLED ✅' : 'DISABLED ❌'} - See HUD for stats!`);
+          // Toggle meta-skip
           break;
         case 'Digit4':
           this.debugMode = 4; // Normals
-          console.log('🎨 Debug: NORMALS');
+          // Normals mode
           break;
         case 'Digit5':
           this.debugMode = 5; // Chunk steps heatmap
-          console.log('🎨 Debug: CHUNK STEPS HEATMAP (how many chunks ray traversed)');
+          // Chunk steps mode
           break;
         case 'Digit6':
           this.debugMode = 6; // Chunk boundaries
-          console.log('🎨 Debug: CHUNK BOUNDARIES');
+          // Chunk boundaries mode
           break;
         case 'Digit7':
           this.debugMode = 7; // Memory heatmap
-          console.log('🎨 Debug: MEMORY HEATMAP');
+          // Memory heatmap mode
           break;
         case 'Digit8':
           this.debugMode = 8; // DAG structure
-          console.log('🎨 Debug: DAG STRUCTURE');
+          // DAG structure mode
           break;
         case 'Digit0':
           this.debugMode = 0; // Normal rendering
-          console.log('🎨 Debug: NORMAL');
+          // Normal rendering mode
           break;
         case 'Digit1':
           this.debugMode = 1; // Depth
-          console.log('🎨 Debug: DEPTH');
+          // Depth mode
           break;
         case 'KeyL':
           this.dumpBufferState();
@@ -1658,8 +1658,8 @@ export class ChunkedSvdagRenderer {
       }
     }
     
-    // Log summary every upload
-    console.log(`📤 [F${this.frameCount}] Meta-grid: BEFORE=${beforeUpload.length}, AFTER=${afterUpload.length}, BAD=${badValues.length}`);
+    // Debug: Verify meta-grid (commented out - too verbose)
+    // console.log(`📤 [F${this.frameCount}] Meta-grid: ${afterUpload.length} entries`);
     if (beforeUpload.length !== afterUpload.length) {
       console.error(`❌ ARRAY MODIFIED DURING UPLOAD! Before: ${beforeUpload.length}, After: ${afterUpload.length}`);
     }
