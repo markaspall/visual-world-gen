@@ -2,7 +2,9 @@ import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs/promises';
-import chunkRoutes from './server/routes/chunks.js';
+
+// import chunkRoutes from './server/routes/chunks.js';  // V1 disabled
+import chunksV2Routes from './server/routes/chunksv2.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -229,11 +231,46 @@ app.get('/worlds/:worldId/infinite', (req, res) => {
 });
 
 // Mount chunk API routes
-app.use('/api', chunkRoutes);
+// app.use('/api', chunkRoutes);  // V1 disabled
+app.use('/api/v2', chunksV2Routes);
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`🚀 Server running at http://localhost:${PORT}`);
   console.log(`📁 Storage directory: ${STORAGE_DIR}`);
   console.log(`🌍 Worlds directory: ${WORLDS_DIR}`);
   console.log(`📦 Server-side chunk generation enabled`);
+  console.log(`🎮 V2 pipeline available at /api/v2/*`);
+});
+
+// Keep server alive - prevent Node.js from exiting when event loop is empty
+server.timeout = 0; // No timeout
+server.keepAliveTimeout = 120000; // 120 seconds
+
+// Keep the process alive with a heartbeat
+const heartbeat = setInterval(() => {
+  // Just keep the event loop alive
+}, 60000); // Every 60 seconds
+
+// Prevent server from crashing on unhandled errors
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('❌ Unhandled Rejection at:', promise);
+  console.error('❌ Reason:', reason);
+  console.error('❌ Stack:', reason?.stack);
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('❌ Uncaught Exception:', error);
+  console.error('❌ Message:', error.message);
+  console.error('❌ Stack:', error.stack);
+  // Don't exit - try to keep running
+});
+
+// Graceful shutdown
+process.on('SIGINT', () => {
+  console.log('\n🛑 Shutting down gracefully...');
+  clearInterval(heartbeat);
+  server.close(() => {
+    console.log('✅ Server closed');
+    process.exit(0);
+  });
 });

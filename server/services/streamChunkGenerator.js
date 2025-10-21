@@ -213,12 +213,14 @@ export class StreamChunkGenerator {
     // ========================================================================
     // 🧪 TEST WORLD MODE - Predictable patterns for validation
     // ========================================================================
-    const TEST_MODE = true;  // Set to true for testing
+    const TEST_MODE = false;  // Set to true for testing
     const TEST_PATTERN = 'WATER_POND';  // Options: 'FLAT_WORLD', 'CHECKERBOARD', 'STRIPES', 'STEPS', 'WATER_POND'
     
     if (TEST_MODE) {
       return this.generateTestPattern(voxelGrid, cx, cy, cz, TEST_PATTERN);
     }
+
+    console.log('Hey - im doing stuff');
     
     // Convert stream chunk coord to voxel position
     const voxelX = cx * chunkSize;

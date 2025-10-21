@@ -92,7 +92,7 @@ export class ChunkManager {
    * Fetch chunk from server
    */
   async fetchChunk(cx, cy, cz) {
-    const url = `/api/worlds/${this.worldId}/chunks/${cx}/${cy}/${cz}`;
+    const url = `/api/v2/worlds/${this.worldId}/chunks/${cx}/${cy}/${cz}`;
     
     try {
       // Fetching chunk...
@@ -184,7 +184,7 @@ export class ChunkManager {
       offset += 4;
     }
 
-    return {
+    const result = {
       version,
       chunkSize,
       materialSVDAG: {
@@ -198,6 +198,10 @@ export class ChunkManager {
         rootIdx: opqRootIdx
       }
     };
+    
+    // Empty chunk logging disabled
+    
+    return result;
   }
 
   /**

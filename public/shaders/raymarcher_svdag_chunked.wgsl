@@ -248,9 +248,9 @@ fn getChunkIndexByCoord(chunkCoord: vec3<i32>) -> i32 {
     
     // Check if this is the chunk we're looking for
     let chunk = chunkMetadata[index];
-    let cx = i32(round(chunk.world_offset.x / 32.0));
-    let cy = i32(round(chunk.world_offset.y / 32.0));
-    let cz = i32(round(chunk.world_offset.z / 32.0));
+    let cx = i32(floor(chunk.world_offset.x / 32.0));
+    let cy = i32(floor(chunk.world_offset.y / 32.0));
+    let cz = i32(floor(chunk.world_offset.z / 32.0));
     
     if (cx == chunkCoord.x && cy == chunkCoord.y && cz == chunkCoord.z) {
       return i32(index);  // Found it!
@@ -475,6 +475,12 @@ fn traverseSVDAG(
             stack[stack_size].packed_idx_depth = packIdxDepth(child_idx, depth + 1u);
             stack[stack_size].pos_xyz = child_center;  // Store CENTER
             stack_size++;
+          } else {
+            // STACK OVERFLOW - treat current node as solid!
+            hit.distance = current_t;
+            hit.block_id = 255u;  // Special debug color
+            hit.normal = vec3<f32>(1.0, 0.0, 0.0);  // Red = error
+            return hit;
           }
         }
       }
@@ -863,17 +869,22 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let aspect = camera.aspect;
   let tan_half_fov = tan(camera.fov * 0.5);
   
+  // FLIP Y-axis: negate Y in camera position and direction vectors
+  let flipped_pos = vec3<f32>(camera.position.x, -camera.position.y, camera.position.z);
+  let flipped_forward = vec3<f32>(camera.forward.x, -camera.forward.y, camera.forward.z);
+  let flipped_up = vec3<f32>(camera.up.x, -camera.up.y, camera.up.z);
+  
   let ray_dir = normalize(
-    camera.forward +
+    flipped_forward +
     camera.right * uv.x * aspect * tan_half_fov +
-    camera.up * uv.y * tan_half_fov
+    flipped_up * uv.y * tan_half_fov
   );
   
   // Raymarch through chunks (Material DAG only - single-DAG system)
-  let hit = raymarchChunks(camera.position, ray_dir);
+  let hit = raymarchChunks(flipped_pos, ray_dir);
   
   // Shade
-  let color = shade(hit, camera.position, ray_dir);
+  let color = shade(hit, flipped_pos, ray_dir);
   
   textureStore(outputTexture, global_id.xy, vec4<f32>(color, 1.0));
 }

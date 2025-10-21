@@ -43,11 +43,11 @@ export class ChunkedSvdagRenderer {
     this.lastLogTime = 0;
     this.stableFrames = 0;
     
-    // Camera (DEBUG: Center of test chunk 0,4,0 at world [0-32, 128-160, 0-32])
+    // Camera - positioned to view 6x6 terrain column (shader negates Y)
     this.camera = {
-      position: [16, 135, 16],  // Center of chunk (0,4,0)
-      yaw: 0,
-      pitch: -0.5,  // Look down a bit to see the plane
+      position: [550, -150, 550],  // Real Y=-150, shader sees +150 (high altitude)
+      yaw: Math.PI * 1.25,  // Face toward origin
+      pitch: -0.3,  // Look down
       fov: Math.PI / 3,
       moveSpeed: 15.0,
       lookSpeed: 0.002
@@ -693,12 +693,12 @@ export class ChunkedSvdagRenderer {
       this.camera.position[2] += right[2] * speed;
     }
     
-    // Vertical movement
+    // Vertical movement (shader negates Y, so controls are inverted)
     if (this.keys['Space']) {
-      this.camera.position[1] += speed;
+      this.camera.position[1] -= speed; // Space = up = decrease Y (shader negates to increase)
     }
     if (this.keys['ShiftLeft'] || this.keys['ShiftRight']) {
-      this.camera.position[1] -= speed;
+      this.camera.position[1] += speed; // Shift = down = increase Y (shader negates to decrease)
     }
   }
 
@@ -1539,13 +1539,44 @@ export class ChunkedSvdagRenderer {
       // uintView[uintOffset + 6] = 0;  // padding1 (optional, already zero)
       // uintView[uintOffset + 7] = 0;  // padding2 (optional, already zero)
       
+      // Debug logging (disabled for performance)
+      
       // Add material nodes/leaves to combined buffers
-      allNodes.push(...chunk.materialSVDAG.nodes);
+      // CRITICAL: Adjust indices before combining!
+      const adjustedNodes = [...chunk.materialSVDAG.nodes];
+      let ni = 0;
+      while (ni < adjustedNodes.length) {
+        const tag = adjustedNodes[ni];
+        if (tag === 1) {
+          // Leaf node: [tag=1, leafIdx, padding] - 3 elements
+          adjustedNodes[ni + 1] += leavesOffset;
+          ni += 3;
+        } else if (tag === 0) {
+          // Inner node: [tag=0, childMask, child0, child1, ...] - variable length
+          const childMask = adjustedNodes[ni + 1];
+          let childCount = 0;
+          for (let bit = 0; bit < 8; bit++) {
+            if (childMask & (1 << bit)) childCount++;
+          }
+          // Adjust each child index
+          for (let c = 0; c < childCount; c++) {
+            adjustedNodes[ni + 2 + c] += nodesOffset;
+          }
+          ni += 2 + childCount;
+        } else {
+          console.error(`Unknown node tag: ${tag} at index ${ni}`);
+          break;
+        }
+      }
+      
+      allNodes.push(...adjustedNodes);
       allLeaves.push(...chunk.materialSVDAG.leaves);
       
       nodesOffset += chunk.materialSVDAG.nodes.length;
       leavesOffset += chunk.materialSVDAG.leaves.length;
     }
+    
+    // Debug logging disabled
     
     // Upload to GPU (use the ArrayBuffer directly)
     this.device.queue.writeBuffer(this.chunkMetadataBuffer, 0, buffer);
@@ -1556,7 +1587,7 @@ export class ChunkedSvdagRenderer {
     const hashTable = this.buildChunkHashTable(chunks);
     this.device.queue.writeBuffer(this.chunkHashTableBuffer, 0, hashTable);
     
-    // Hash table uploaded (debug logging disabled)
+    // Hash table verification disabled
     
     // Stage 7b: Build and upload meta-grid for spatial skipping
     this.buildMetaGrid(chunks);
