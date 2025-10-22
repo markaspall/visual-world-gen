@@ -17,12 +17,11 @@ struct Camera {
 struct ChunkMetadata {
   world_offset: vec3<f32>,      // Chunk position in world space (12 bytes)
   chunk_size: f32,              // Size of chunk (32) (4 bytes)
-  material_root: u32,           // Root index for material SVDAG (4 bytes)
+  material_root: u32,           // Root NODE index (absolute in combined buffer) (4 bytes)
   material_node_count: u32,     // Number of nodes in material SVDAG (4 bytes)
-  _padding1: u32,               // Padding to align to 32 bytes (4 bytes)
-  _padding2: u32,               // Padding to align to 32 bytes (4 bytes)
-  // Total: 32 bytes (GPU requires 16-byte alignment)
-}
+  material_node_base: u32,      // Base offset of chunk's first node (for child pointers) (4 bytes)
+  _padding: u32,                // Padding to align to 32 bytes (4 bytes)
+}  // Total: 32 bytes (GPU requires 16-byte alignment)
 
 struct BlockMaterial {
   colorR: f32,
@@ -85,6 +84,7 @@ fn unpackDepth(packed: u32) -> u32 {
 @group(0) @binding(7) var<storage, read_write> chunkRequests: array<atomic<u32>>;
 @group(0) @binding(8) var<storage, read> chunkHashTable: array<u32>;
 @group(0) @binding(9) var<storage, read> metaGrid: array<u32>;  // Stage 7b: Spatial skip grid
+@group(0) @binding(10) var<storage, read_write> debugInfo: array<i32>;  // Center ray debug info
 
 const MAX_STACK_DEPTH = 19;
 const MAX_STEPS = 256;
@@ -332,8 +332,9 @@ fn traverseSVDAG(
   // (Nodes will be offset by chunk.world_offset)
   let world_origin = ray_origin;
   
-  // Get root index and node count for this chunk (Material DAG only)
-  let root_idx = chunk.material_root;
+  // Get root index, base offset, and node count for this chunk
+  let root_idx = chunk.material_root;  // Absolute position of root node
+  let node_base = chunk.material_node_base;  // Absolute position of chunk's first node
   let node_count = chunk.material_node_count;
   
   // Empty chunk check: node_count == 0, NOT root_idx == 0!
@@ -351,7 +352,9 @@ fn traverseSVDAG(
   // Initialize stack with root at CHUNK CENTER in WORLD coordinates!
   let chunk_local_center = vec3<f32>(world_size * 0.5);
   let chunk_world_center = chunk.world_offset + chunk_local_center;
-  stack[0].packed_idx_depth = packIdxDepth(root_idx, 0u);
+  // Pack RELATIVE index (root_idx - node_base) to avoid 16-bit overflow
+  let root_idx_relative = root_idx - node_base;
+  stack[0].packed_idx_depth = packIdxDepth(root_idx_relative, 0u);
   stack[0].pos_xyz = chunk_world_center;  // WORLD coordinates!
   stack_size = 1;
   
@@ -364,7 +367,8 @@ fn traverseSVDAG(
     stack_size--;
     
     let entry = stack[stack_size];
-    let node_idx = unpackNodeIdx(entry.packed_idx_depth);
+    let node_idx_relative = unpackNodeIdx(entry.packed_idx_depth);
+    let node_idx = node_base + node_idx_relative;  // Convert to absolute
     let depth = unpackDepth(entry.packed_idx_depth);
     let node_center = entry.pos_xyz;  // This is now CENTER
     
@@ -469,10 +473,12 @@ fn traverseSVDAG(
           // Count how many children come before this octant in the mask
           let child_count = countOneBits(child_mask & ((1u << octant) - 1u));
           // Child indices start at node_idx + 2
-          let child_idx = svdag_nodes[node_idx + 2u + child_count];
+          // Child pointers are RELATIVE (within chunk) - pack them as-is, don't add node_base yet
+          let child_idx_relative = svdag_nodes[node_idx + 2u + child_count];
           
           if (stack_size < MAX_STACK_DEPTH) {
-            stack[stack_size].packed_idx_depth = packIdxDepth(child_idx, depth + 1u);
+            // Pack RELATIVE index to avoid 16-bit overflow
+            stack[stack_size].packed_idx_depth = packIdxDepth(child_idx_relative, depth + 1u);
             stack[stack_size].pos_xyz = child_center;  // Store CENTER
             stack_size++;
           } else {
@@ -882,6 +888,31 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   
   // Raymarch through chunks (Material DAG only - single-DAG system)
   let hit = raymarchChunks(flipped_pos, ray_dir);
+  
+  // CENTER RAY DEBUG: Write info about EXACT center pixel hit
+  // Use same calculation as crosshair display (pixel-perfect center)
+  if (global_id.x == dims.x / 2u && global_id.y == dims.y / 2u) {
+    // debugInfo layout: [0]=hit, [1]=chunk_idx, [2]=cx, [3]=cy, [4]=cz, [5]=block_id, [6]=steps, [7]=chunk_steps
+    let hit_detected = hit.block_id > 0u && hit.chunk_index >= 0;
+    debugInfo[0] = i32(hit_detected);
+    debugInfo[1] = hit.chunk_index;
+    if (hit_detected) {
+      let chunk = chunkMetadata[u32(hit.chunk_index)];
+      debugInfo[2] = i32(chunk.world_offset.x / 32.0);  // cx
+      debugInfo[3] = i32(chunk.world_offset.y / 32.0);  // cy
+      debugInfo[4] = i32(chunk.world_offset.z / 32.0);  // cz
+      debugInfo[5] = i32(hit.block_id);
+      debugInfo[6] = i32(hit.steps);  // SVDAG traversal steps within chunk
+      debugInfo[7] = i32(hit.chunk_steps);  // How many chunks ray traversed
+    } else {
+      debugInfo[2] = -999;  // No hit
+      debugInfo[3] = -999;
+      debugInfo[4] = -999;
+      debugInfo[5] = -999;
+      debugInfo[6] = -999;
+      debugInfo[7] = -999;
+    }
+  }
   
   // Shade
   let color = shade(hit, flipped_pos, ray_dir);

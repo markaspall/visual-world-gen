@@ -259,7 +259,7 @@ router.get('/worlds/:worldId/chunks/:x/:y/:z', async (req, res) => {
     let solidCount = 0;
     let airCount = 0;
     
-    if (cx >= -6 && cx <= 5 && cz >= -6 && cz <= 5) {
+    // if (cx >= -6 && cx <= 5 && cz >= -6 && cz <= 5) {
       // Inside 12x12 column - generate terrain at all Y levels
       for (let voxZ = 0; voxZ < 32; voxZ++) {
         for (let voxX = 0; voxX < 32; voxX++) {
@@ -289,12 +289,14 @@ router.get('/worlds/:worldId/chunks/:x/:y/:z', async (req, res) => {
           }
         }
       }
-    } else {
-      // Outside 12x12 column - all air
-      airCount = 32 * 32 * 32;
-    }
+    // } else {
+    //   // Outside 12x12 column - all air
+    //   airCount = 32 * 32 * 32;
+    // }
+
+    // Debug logging disabled - server generation is working correctly
     
-    const voxelData = { voxels };
+    const voxelData = { voxels, solidVoxels: solidCount, airVoxels: airCount };
     
     const chunkTime = Date.now() - chunkStart;
     

@@ -37,17 +37,40 @@ export class ChunkedSvdagRenderer {
     this.gridSize = this.viewDistanceChunks * 2 + 1;  // 33
     this.requestBufferSize = this.gridSize ** 3;  // 35,937
     this.isProcessingRequests = false;  // Prevent concurrent reads
+    this.isReadingDebug = false;  // Prevent concurrent debug reads
+    
+    // Debug HUD collapse state
+    this.debugSections = {
+      basic: true,
+      chunks: true,
+      eviction: false,
+      memory: false,
+      meta: false,
+      dedup: true,
+      position: true,
+      inspector: true
+    };
+    this.debugLogging = {
+      requests: false,
+      uploads: false,
+      eviction: false,
+      memory: false,
+      meta: false,
+      dedup: true,
+      position: true,
+      inspector: true
+    };
     
     // Logging throttle
     this.lastRequestCount = 0;
     this.lastLogTime = 0;
     this.stableFrames = 0;
     
-    // Camera - positioned to view 6x6 terrain column (shader negates Y)
+    // Camera - positioned to view terrain
     this.camera = {
-      position: [550, -150, 550],  // Real Y=-150, shader sees +150 (high altitude)
+      position: [550, -150, 550],  // High altitude view
       yaw: Math.PI * 1.25,  // Face toward origin
-      pitch: -0.3,  // Look down
+      pitch: -0.3,  // Look down slightly
       fov: Math.PI / 3,
       moveSpeed: 15.0,
       lookSpeed: 0.002
@@ -255,6 +278,17 @@ export class ChunkedSvdagRenderer {
     this.metaGridBuffer.unmap();
     // Meta-grid buffer initialized
     
+    // Debug info buffer for center ray inspection
+    this.debugInfoBuffer = this.device.createBuffer({
+      size: 32, // 8 i32 values: hit, chunk_idx, cx, cy, cz, material, depth, distance
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
+    });
+    
+    this.debugInfoStaging = this.device.createBuffer({
+      size: 32,
+      usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+    });
+    
     // Create pipeline
     const shaderModule = this.device.createShaderModule({ code: shaderCode });
     
@@ -276,7 +310,8 @@ export class ChunkedSvdagRenderer {
         { binding: 6, resource: { buffer: this.materialsBuffer } },
         { binding: 7, resource: { buffer: this.chunkRequestBuffer } },
         { binding: 8, resource: { buffer: this.chunkHashTableBuffer } },
-        { binding: 9, resource: { buffer: this.metaGridBuffer } }  // Stage 7b: Meta-grid
+        { binding: 9, resource: { buffer: this.metaGridBuffer } },  // Stage 7b: Meta-grid
+        { binding: 10, resource: { buffer: this.debugInfoBuffer } }  // Center ray debug
       ]
     });
     
@@ -418,9 +453,30 @@ export class ChunkedSvdagRenderer {
       <div style="margin-top: 8px; color: #0ff; font-weight: bold;">⚡ Optimizations</div>
       <div><b>M</b> - Toggle Meta-Skip</div>
       <div style="margin-top: 8px; color: #0ff; font-weight: bold;">🔍 Debug</div>
+      <div><b>I</b> - Inspect center chunk</div>
       <div><b>L</b> - Dump buffer state</div>
     `;
     document.body.appendChild(controls);
+    
+    // Create crosshair for center ray inspection
+    const crosshair = document.createElement('div');
+    crosshair.id = 'debug-crosshair';
+    crosshair.style.cssText = `
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      width: 20px;
+      height: 20px;
+      margin: -10px 0 0 -10px;
+      border: 2px solid rgba(255, 255, 0, 0.7);
+      border-radius: 50%;
+      pointer-events: none;
+      z-index: 999;
+      box-shadow: 0 0 5px rgba(255, 255, 0, 0.5);
+      transition: border-color 0.1s, box-shadow 0.1s;
+    `;
+    document.body.appendChild(crosshair);
+    this.crosshair = crosshair;
   }
   
   showFreezeWarning() {
@@ -493,47 +549,107 @@ export class ChunkedSvdagRenderer {
     const gpuMB = (totalGPU / 1024 / 1024).toFixed(2);
     const avgPerChunk = chunks > 0 ? (totalGPU / chunks / 1024).toFixed(1) : '0';
     
+    const arrow = (expanded) => expanded ? '▼' : '▶';
+    
     this.debugHUD.innerHTML = `
-      <div style="color: #0ff; font-weight: bold; margin-bottom: 5px;">📊 Debug Info</div>
-      <div><b>FPS:</b> ${this.fps.toFixed(1)}</div>
-      <div><b>Frame:</b> ${this.frameCount}</div>
-      <div><b>Mode:</b> ${modeName} (${this.debugMode})</div>
-      <div style="margin-top: 6px; color: #ff0; font-weight: bold;">📦 Chunk Cache</div>
-      <div><b>Loaded:</b> ${chunks}/${cacheStatus.softLimit} <span style="color:#888">(hard: ${cacheStatus.hardLimit})</span></div>
-      <div><b>On GPU:</b> ${this.uploadedChunkCount}</div>
-      <div><b>Soft fill:</b> <span style="color:${cacheStatus.softPercent > 100 ? '#f00' : cacheStatus.softPercent > 80 ? '#f80' : '#0f0'}">${cacheStatus.softPercent}%</span></div>
-      <div><b>Hard fill:</b> <span style="color:${cacheStatus.hardPercent > 95 ? '#f00' : cacheStatus.hardPercent > 80 ? '#f80' : '#0f0'}">${cacheStatus.hardPercent}%</span></div>
-      <div style="margin-top: 4px; color: #f80; font-weight: bold;">🗑️ Eviction</div>
-      <div><b>Strategy:</b> <span style="color:#0ff">${cacheStatus.lastEvictionReason}</span></div>
-      <div><b>This frame:</b> <span style="color:${this.evictedThisFrame > 0 ? '#f80' : '#0f0'}">${this.evictedThisFrame}</span></div>
-      <div><b>Proactive:</b> ${cacheStatus.proactiveEvictions}</div>
-      <div><b>Emergency:</b> <span style="color:${cacheStatus.emergencyEvictions > 0 ? '#f00' : '#0f0'}">${cacheStatus.emergencyEvictions}</span></div>
-      <div><b>Total:</b> ${cacheStatus.totalEvictions}</div>
-      <div style="margin-top: 4px; color: #888;">Chunk misses: ${this.cacheHitsThisFrame} / ${this.totalCacheHits}</div>
-      <div><b>Range:</b> ${chunkRange}</div>
-      <div><b>Max distance:</b> <span style="color:${this.adaptiveMaxDistance < 2048 ? '#f80' : '#0f0'}">${this.adaptiveMaxDistance || 2048}</span></div>
-      <div><b>Max chunk steps:</b> <span style="color:${this.adaptiveMaxChunkSteps < 128 ? '#f80' : '#0f0'}">${this.adaptiveMaxChunkSteps || 128}</span></div>
-      <div><b>Frozen:</b> ${this.freezeChunks ? '<span style="color:#f80">YES</span>' : 'no'}</div>
-      <div style="margin-top: 6px; color: #0f0; font-weight: bold;">💾 GPU Memory</div>
-      <div><b>Total:</b> ${gpuMB} MB</div>
-      <div><b>Per chunk:</b> ${avgPerChunk} KB</div>
-      <div style="font-size: 10px; color: #aaa;">Metadata: ${(this.gpuMemoryUsed.metadata/1024).toFixed(1)}KB | Nodes: ${(this.gpuMemoryUsed.nodes/1024).toFixed(1)}KB</div>
-      <div style="font-size: 10px; color: #aaa;">Leaves: ${(this.gpuMemoryUsed.leaves/1024).toFixed(1)}KB | Hash: ${(this.gpuMemoryUsed.hashTable/1024).toFixed(1)}KB</div>
-      <div style="margin-top: 6px; color: #f80; font-weight: bold;">🗺️ Meta-SVDAG Skip</div>
-      <div><b>Status:</b> <span style="color:${this.metaSkipEnabled ? '#0f0' : '#f00'}">${this.metaSkipEnabled ? 'ON ✅' : 'OFF ❌'}</span> <span style="color:#888">(M key)</span></div>
-      <div><b>Meta chunk:</b> ${this.metaChunkSize.x}x${this.metaChunkSize.y}x${this.metaChunkSize.z} (${this.metaChunkSize.x * this.metaChunkSize.y * this.metaChunkSize.z} chunks)</div>
-      <div><b>Meta-chunks:</b> ${Array.from(this.metaGrid).filter(v => v === 1).length}/${this.metaGrid.length} populated</div>
-      <div style="margin-top: 6px; color: #0ff; font-weight: bold;">♻️ SVDAG Dedup</div>
-      <div><b>Unique:</b> ${this.chunkManager.svdagPool.size}/${chunks}</div>
-      <div><b>Savings:</b> <span style="color:#0f0">${chunks > 0 ? ((1 - this.chunkManager.svdagPool.size / chunks) * 100).toFixed(1) : 0}%</span></div>
-      <div><b>Memory saved:</b> ${((chunks - this.chunkManager.svdagPool.size) * 0.05).toFixed(1)} MB</div>
-      <div style="margin-top: 6px; color: #f0f; font-weight: bold;">📍 Position</div>
-      <div><b>World:</b> ${pos[0].toFixed(1)}, ${pos[1].toFixed(1)}, ${pos[2].toFixed(1)}</div>
-      <div><b>Chunk:</b> <span style="color:${rangeColor}">(${camChunk.cx}, ${camChunk.cy}, ${camChunk.cz})</span></div>
-      <div><b>In Range:</b> <span style="color:${rangeColor}">${inRange ? 'YES' : 'NO'}</span></div>
-      <div><b>Yaw:</b> ${(this.camera.yaw * 180 / Math.PI).toFixed(1)}°</div>
-      <div><b>Pitch:</b> ${(this.camera.pitch * 180 / Math.PI).toFixed(1)}°</div>
+      <div style="color: #0ff; font-weight: bold; margin-bottom: 5px; cursor: pointer; pointer-events: auto;" data-section="basic">📊 Debug Info ${arrow(this.debugSections.basic)}</div>
+      ${this.debugSections.basic ? `
+        <div><b>FPS:</b> ${this.fps.toFixed(1)}</div>
+        <div><b>Frame:</b> ${this.frameCount}</div>
+        <div><b>Mode:</b> ${modeName} (${this.debugMode})</div>
+      ` : ''}
+      
+      <div style="margin-top: 6px; color: #ff0; font-weight: bold; cursor: pointer; pointer-events: auto;" data-section="chunks">📦 Chunk Cache ${arrow(this.debugSections.chunks)}</div>
+      ${this.debugSections.chunks ? `
+        <div><b>Loaded:</b> ${chunks}/${cacheStatus.softLimit} <span style="color:#888">(hard: ${cacheStatus.hardLimit})</span></div>
+        <div><b>On GPU:</b> ${this.uploadedChunkCount}</div>
+        <div><b>Soft fill:</b> <span style="color:${cacheStatus.softPercent > 100 ? '#f00' : cacheStatus.softPercent > 80 ? '#f80' : '#0f0'}">${cacheStatus.softPercent}%</span></div>
+        <div><b>Hard fill:</b> <span style="color:${cacheStatus.hardPercent > 95 ? '#f00' : cacheStatus.hardPercent > 80 ? '#f80' : '#0f0'}">${cacheStatus.hardPercent}%</span></div>
+        <div style="margin-top: 2px; color: #888; font-size: 10px;">Chunk misses: ${this.cacheHitsThisFrame} / ${this.totalCacheHits}</div>
+        <div><b>Range:</b> ${chunkRange}</div>
+        <div><b>Max distance:</b> <span style="color:${this.adaptiveMaxDistance < 2048 ? '#f80' : '#0f0'}">${this.adaptiveMaxDistance || 2048}</span></div>
+        <div><b>Max chunk steps:</b> <span style="color:${this.adaptiveMaxChunkSteps < 128 ? '#f80' : '#0f0'}">${this.adaptiveMaxChunkSteps || 128}</span></div>
+        <div><b>Frozen:</b> ${this.freezeChunks ? '<span style="color:#f80">YES</span>' : 'no'}</div>
+      ` : ''}
+      
+      <div style="margin-top: 6px; color: #f80; font-weight: bold; cursor: pointer; pointer-events: auto;" data-section="eviction">🗑️ Eviction ${arrow(this.debugSections.eviction)}</div>
+      ${this.debugSections.eviction ? `
+        <div><b>Strategy:</b> <span style="color:#0ff">${cacheStatus.lastEvictionReason}</span></div>
+        <div><b>This frame:</b> <span style="color:${this.evictedThisFrame > 0 ? '#f80' : '#0f0'}">${this.evictedThisFrame}</span></div>
+        <div><b>Proactive:</b> ${cacheStatus.proactiveEvictions}</div>
+        <div><b>Emergency:</b> <span style="color:${cacheStatus.emergencyEvictions > 0 ? '#f00' : '#0f0'}">${cacheStatus.emergencyEvictions}</span></div>
+        <div><b>Total:</b> ${cacheStatus.totalEvictions}</div>
+      ` : ''}
+      
+      <div style="margin-top: 6px; color: #0f0; font-weight: bold; cursor: pointer; pointer-events: auto;" data-section="memory">💾 GPU Memory ${arrow(this.debugSections.memory)}</div>
+      ${this.debugSections.memory ? `
+        <div><b>Total:</b> ${gpuMB} MB</div>
+        <div><b>Per chunk:</b> ${avgPerChunk} KB</div>
+        <div style="font-size: 10px; color: #aaa;">Metadata: ${(this.gpuMemoryUsed.metadata/1024).toFixed(1)}KB | Nodes: ${(this.gpuMemoryUsed.nodes/1024).toFixed(1)}KB</div>
+        <div style="font-size: 10px; color: #aaa;">Leaves: ${(this.gpuMemoryUsed.leaves/1024).toFixed(1)}KB | Hash: ${(this.gpuMemoryUsed.hashTable/1024).toFixed(1)}KB</div>
+      ` : ''}
+      
+      <div style="margin-top: 6px; color: #f80; font-weight: bold; cursor: pointer; pointer-events: auto;" data-section="meta">🗺️ Meta-SVDAG Skip ${arrow(this.debugSections.meta)}</div>
+      ${this.debugSections.meta ? `
+        <div><b>Status:</b> <span style="color:${this.metaSkipEnabled ? '#0f0' : '#f00'}">${this.metaSkipEnabled ? 'ON ✅' : 'OFF ❌'}</span> <span style="color:#888">(M key)</span></div>
+        <div><b>Meta chunk:</b> ${this.metaChunkSize.x}x${this.metaChunkSize.y}x${this.metaChunkSize.z} (${this.metaChunkSize.x * this.metaChunkSize.y * this.metaChunkSize.z} chunks)</div>
+        <div><b>Meta-chunks:</b> ${Array.from(this.metaGrid).filter(v => v === 1).length}/${this.metaGrid.length} populated</div>
+      ` : ''}
+      
+      <div style="margin-top: 6px; color: #0ff; font-weight: bold; cursor: pointer; pointer-events: auto;" data-section="dedup">♻️ SVDAG Dedup ${arrow(this.debugSections.dedup)}</div>
+      ${this.debugSections.dedup ? `
+        <div><b>Unique:</b> ${this.chunkManager.svdagPool.size}/${chunks}</div>
+        <div><b>Savings:</b> <span style="color:#0f0">${chunks > 0 ? ((1 - this.chunkManager.svdagPool.size / chunks) * 100).toFixed(1) : 0}%</span></div>
+        <div><b>Memory saved:</b> ${((chunks - this.chunkManager.svdagPool.size) * 0.05).toFixed(1)} MB</div>
+      ` : ''}
+      
+      <div style="margin-top: 6px; color: #f0f; font-weight: bold; cursor: pointer; pointer-events: auto;" data-section="position">📍 Position ${arrow(this.debugSections.position)}</div>
+      ${this.debugSections.position ? `
+        <div><b>World:</b> ${pos[0].toFixed(1)}, ${pos[1].toFixed(1)}, ${pos[2].toFixed(1)}</div>
+        <div><b>Chunk:</b> <span style="color:${rangeColor}">(${camChunk.cx}, ${camChunk.cy}, ${camChunk.cz})</span></div>
+        <div><b>In Range:</b> <span style="color:${rangeColor}">${inRange ? 'YES' : 'NO'}</span></div>
+        <div><b>Yaw:</b> ${(this.camera.yaw * 180 / Math.PI).toFixed(1)}°</div>
+        <div><b>Pitch:</b> ${(this.camera.pitch * 180 / Math.PI).toFixed(1)}°</div>
+      ` : ''}
+      
+      ${this.centerRayInfo ? `
+        <div style="margin-top: 6px; color: #ff0; font-weight: bold; cursor: pointer; pointer-events: auto;" data-section="inspector">🎯 Center Ray ${arrow(this.debugSections.inspector)}</div>
+        ${this.debugSections.inspector ? `
+          ${this.frameCount - this.centerRayInfo.frame > 8 ? '<div style="color:#f00; font-size:10px;">⚠️ Stale data (old frame)</div>' : ''}
+          <div><b>Hit:</b> <span style="color:${this.centerRayInfo.hit ? '#0f0' : '#f00'}">${this.centerRayInfo.hit ? 'YES' : 'NO'}</span> <span style="color:#888; font-size:10px;">(frame ${this.centerRayInfo.frame})</span></div>
+          ${this.centerRayInfo.hit ? `
+            <div><b>Chunk:</b> <span style="color:#0ff">(${this.centerRayInfo.cx}, ${this.centerRayInfo.cy}, ${this.centerRayInfo.cz})</span></div>
+            <div><b>Buffer Idx:</b> ${this.centerRayInfo.chunkIndex}</div>
+            <div><b>Block ID:</b> ${this.centerRayInfo.blockId}</div>
+            <div><b>DAG Steps:</b> <span style="color:${this.centerRayInfo.steps > 50 ? '#f00' : this.centerRayInfo.steps > 20 ? '#f80' : '#0f0'}">${this.centerRayInfo.steps}</span></div>
+            <div><b>Chunk Steps:</b> ${this.centerRayInfo.chunkSteps}</div>
+          ` : '<div style="color:#888;">No hit (looking at sky/empty)</div>'}
+        ` : ''}
+      ` : ''}
     `;
+    
+    // Attach click handlers to section headers
+    const headers = this.debugHUD.querySelectorAll('[data-section]');
+    headers.forEach(header => {
+      header.onclick = () => {
+        const section = header.getAttribute('data-section');
+        this.debugSections[section] = !this.debugSections[section];
+        this.updateDebugHUD();
+      };
+    });
+    
+    // Update crosshair color based on hit status
+    if (this.crosshair && this.centerRayInfo) {
+      if (this.centerRayInfo.hit) {
+        // Green for hit
+        this.crosshair.style.borderColor = 'rgba(0, 255, 0, 0.8)';
+        this.crosshair.style.boxShadow = '0 0 8px rgba(0, 255, 0, 0.6)';
+      } else {
+        // Red for miss
+        this.crosshair.style.borderColor = 'rgba(255, 0, 0, 0.8)';
+        this.crosshair.style.boxShadow = '0 0 8px rgba(255, 0, 0, 0.6)';
+      }
+    }
   }
 
   setupInput() {
@@ -586,6 +702,11 @@ export class ChunkedSvdagRenderer {
           break;
         case 'KeyL':
           this.dumpBufferState();
+          // L = dump buffer state
+          break;
+        case 'KeyI':
+          this.dumpInspectedChunk();
+          // I = dump inspected chunk details
           break;
         case 'KeyE':
           this.forceEviction();
@@ -700,6 +821,112 @@ export class ChunkedSvdagRenderer {
     if (this.keys['ShiftLeft'] || this.keys['ShiftRight']) {
       this.camera.position[1] += speed; // Shift = down = increase Y (shader negates to decrease)
     }
+  }
+
+  dumpInspectedChunk() {
+    if (!this.centerRayInfo || !this.centerRayInfo.hit) {
+      console.log('❌ No chunk hit - crosshair not pointing at terrain');
+      return;
+    }
+    
+    console.log('═══════════════════════════════════════');
+    console.log('🎯 INSPECTED CHUNK DETAILS');
+    console.log('═══════════════════════════════════════');
+    console.log(`Chunk Coordinates: (${this.centerRayInfo.cx}, ${this.centerRayInfo.cy}, ${this.centerRayInfo.cz})`);
+    console.log(`Buffer Index (from GPU): ${this.centerRayInfo.chunkIndex}`);
+    console.log(`Block ID: ${this.centerRayInfo.blockId}`);
+    console.log(`DAG Steps: ${this.centerRayInfo.steps}`);
+    console.log(`Chunk Steps: ${this.centerRayInfo.chunkSteps}`);
+    console.log(`Frame: ${this.centerRayInfo.frame} (current: ${this.frameCount})`);
+    
+    // Find the actual chunk in memory
+    const chunkKey = `${this.centerRayInfo.cx},${this.centerRayInfo.cy},${this.centerRayInfo.cz}`;
+    const chunk = this.chunkManager.chunks.get(chunkKey);
+    
+    // Find what buffer index it SHOULD be at
+    const allChunks = this.chunkManager.getLoadedChunks();
+    let expectedIndex = -1;
+    for (let i = 0; i < allChunks.length; i++) {
+      if (allChunks[i].cx === this.centerRayInfo.cx && 
+          allChunks[i].cy === this.centerRayInfo.cy && 
+          allChunks[i].cz === this.centerRayInfo.cz) {
+        expectedIndex = i;
+        break;
+      }
+    }
+    
+    if (expectedIndex !== this.centerRayInfo.chunkIndex) {
+      console.warn(`⚠️ INDEX MISMATCH! GPU says ${this.centerRayInfo.chunkIndex}, should be ${expectedIndex}`);
+      if (expectedIndex >= 0 && expectedIndex < allChunks.length) {
+        const wrongChunk = allChunks[this.centerRayInfo.chunkIndex];
+        if (wrongChunk) {
+          console.warn(`   GPU is reading chunk (${wrongChunk.cx},${wrongChunk.cy},${wrongChunk.cz}) instead!`);
+        }
+      }
+    } else {
+      console.log(`✓ Buffer index correct (${expectedIndex})`);
+    }
+    
+    if (chunk) {
+      console.log('─────────────────────────────────────');
+      console.log('📦 CHUNK DATA (from memory):');
+      console.log(`  Solid voxels: ${chunk.solidVoxels || 'unknown'}`);
+      console.log(`  Air voxels: ${chunk.airVoxels || 'unknown'}`);
+      console.log(`  SVDAG nodes: ${chunk.materialSVDAG?.nodes.length || 0}`);
+      console.log(`  SVDAG leaves: ${chunk.materialSVDAG?.leaves.length || 0}`);
+      console.log(`  SVDAG root idx: ${chunk.materialSVDAG?.rootIdx}`);
+      console.log(`  SVDAG hash: ${chunk.svdagHash || 'none'}`);
+      console.log(`  Is deduped: ${chunk.isDeduplicated ? 'YES' : 'NO'}`);
+      
+      
+      // Log voxel patterns for inspection
+      if (chunk.voxels) {
+        const sampleVoxels = Array.from(chunk.voxels.slice(0, 64));
+        const solidInSample = sampleVoxels.filter(v => v > 0).length;
+        console.log(`  First 64 voxels (${solidInSample} solid): ${sampleVoxels.join(',')}`);
+        
+        // Check if chunk is all solid (suspicious)
+        const allSolid = Array.from(chunk.voxels).every(v => v > 0);
+        const allAir = Array.from(chunk.voxels).every(v => v === 0);
+        if (allSolid) console.warn('  ⚠️ CHUNK IS ALL SOLID!');
+        if (allAir) console.log('  ℹ️ Chunk is all air');
+      }
+      
+      // Log first few DAG nodes
+      if (chunk.materialSVDAG?.nodes) {
+        const sampleNodes = chunk.materialSVDAG.nodes.slice(0, 16);
+        console.log(`  First 16 DAG nodes (hex): ${sampleNodes.map(n => '0x' + n.toString(16).padStart(2,'0')).join(', ')}`);
+        console.log(`  First 16 DAG nodes (dec): ${sampleNodes.join(', ')}`);
+        
+        // Decode root node (format: [tag, childMask_or_leafIdx, child0, child1, ...])
+        const rootIdx = chunk.materialSVDAG.rootIdx || 0;
+        const rootTag = chunk.materialSVDAG.nodes[rootIdx];
+        const rootData = chunk.materialSVDAG.nodes[rootIdx + 1];
+        
+        console.log(`  Root node analysis:`);
+        if (rootTag === 1) {
+          // Leaf node
+          console.log(`    Type: LEAF`);
+          console.log(`    Leaf index: ${rootData}`);
+          if (chunk.materialSVDAG.leaves) {
+            const blockId = chunk.materialSVDAG.leaves[rootData];
+            console.log(`    Block ID: ${blockId}`);
+          }
+          console.log(`    ⚠️ ROOT IS A LEAF (entire chunk is solid block ${rootData})!`);
+        } else {
+          // Inner node
+          const childMask = rootData;
+          const childCount = childMask.toString(2).split('1').length - 1;
+          console.log(`    Type: INNER NODE`);
+          console.log(`    Child mask: 0b${childMask.toString(2).padStart(8,'0')} (${childCount} children)`);
+          console.log(`    ${childCount === 0 ? '⚠️ NO CHILDREN (empty!)' : childCount === 8 ? 'All 8 children present' : `${childCount} children`}`);
+        }
+      }
+    } else {
+      console.log('⚠️ Chunk not found in memory! May have been evicted.');
+    }
+    
+    console.log('═══════════════════════════════════════');
   }
 
   dumpBufferState() {
@@ -1368,8 +1595,6 @@ export class ChunkedSvdagRenderer {
       
       if (probes < 64) {
         hashTable[slot] = i;  // Store chunk index
-      } else {
-        console.warn(`⚠️ Hash table full! Couldn't insert chunk (${chunk.cx},${chunk.cy},${chunk.cz})`);
       }
     }
     
@@ -1532,35 +1757,36 @@ export class ChunkedSvdagRenderer {
       floatView[floatOffset + 2] = chunk.cz * 32;
       floatView[floatOffset + 3] = 32; // chunk size
       
-      // Material SVDAG - store root index (offset into combined buffer) + node count - as UINTS!
+      // Material SVDAG metadata - as UINTS!
+      // material_root = absolute position of ROOT NODE (for initial traversal)
+      // material_node_base = absolute position of chunk's FIRST node (for child pointer conversion)
       const matRootInCombined = nodesOffset + chunk.materialSVDAG.rootIdx;
+      const matBaseInCombined = nodesOffset;  // First node of this chunk
       uintView[uintOffset + 4] = matRootInCombined;
       uintView[uintOffset + 5] = chunk.materialSVDAG.nodes.length;
-      // uintView[uintOffset + 6] = 0;  // padding1 (optional, already zero)
-      // uintView[uintOffset + 7] = 0;  // padding2 (optional, already zero)
+      uintView[uintOffset + 6] = matBaseInCombined;  // NEW: base offset for child pointer conversion
+      // uintView[uintOffset + 7] = 0;  // padding
       
-      // Debug logging (disabled for performance)
+      // Debug logging removed - use 'I' key inspector instead
       
       // Add material nodes/leaves to combined buffers
-      // CRITICAL: Adjust indices before combining!
+      // IMPORTANT: Keep node pointers RELATIVE (within chunk) because shader packs indices to 16 bits!
+      // The shader will add material_root when traversing, so absolute pointers would overflow.
+      // However, leaf indices must be ABSOLUTE since leaves are in a shared buffer.
       const adjustedNodes = [...chunk.materialSVDAG.nodes];
       let ni = 0;
       while (ni < adjustedNodes.length) {
         const tag = adjustedNodes[ni];
         if (tag === 1) {
-          // Leaf node: [tag=1, leafIdx, padding] - 3 elements
+          // Leaf node: adjust leaf index to be absolute in combined buffer
           adjustedNodes[ni + 1] += leavesOffset;
           ni += 3;
         } else if (tag === 0) {
-          // Inner node: [tag=0, childMask, child0, child1, ...] - variable length
+          // Inner node: keep child pointers RELATIVE (shader will add material_root)
           const childMask = adjustedNodes[ni + 1];
           let childCount = 0;
           for (let bit = 0; bit < 8; bit++) {
             if (childMask & (1 << bit)) childCount++;
-          }
-          // Adjust each child index
-          for (let c = 0; c < childCount; c++) {
-            adjustedNodes[ni + 2 + c] += nodesOffset;
           }
           ni += 2 + childCount;
         } else {
@@ -1575,8 +1801,6 @@ export class ChunkedSvdagRenderer {
       nodesOffset += chunk.materialSVDAG.nodes.length;
       leavesOffset += chunk.materialSVDAG.leaves.length;
     }
-    
-    // Debug logging disabled
     
     // Upload to GPU (use the ArrayBuffer directly)
     this.device.queue.writeBuffer(this.chunkMetadataBuffer, 0, buffer);
@@ -1777,7 +2001,21 @@ export class ChunkedSvdagRenderer {
     renderPass.draw(6);
     renderPass.end();
     
+    // Copy debug buffer to staging for readback (only every 4 frames to avoid conflicts)
+    if (this.frameCount % 4 === 0 && !this.isReadingDebug) {
+      commandEncoder.copyBufferToBuffer(
+        this.debugInfoBuffer, 0,
+        this.debugInfoStaging, 0,
+        32
+      );
+    }
+    
     this.device.queue.submit([commandEncoder.finish()]);
+    
+    // Read debug info asynchronously (don't block render, throttled)
+    if (this.frameCount % 4 === 0 && !this.isReadingDebug) {
+      this.readDebugInfo();
+    }
     
     // Update debug HUD
     this.updateDebugHUD();
@@ -1788,6 +2026,36 @@ export class ChunkedSvdagRenderer {
       this.processChunkRequests().catch(err => 
         console.error('Error processing chunk requests:', err)
       );
+    }
+  }
+
+  async readDebugInfo() {
+    // Skip if already reading
+    if (this.isReadingDebug) return;
+    
+    this.isReadingDebug = true;
+    try {
+      await this.debugInfoStaging.mapAsync(GPUMapMode.READ);
+      const data = new Int32Array(this.debugInfoStaging.getMappedRange());
+      
+      // Store the debug info with frame number for staleness detection
+      this.centerRayInfo = {
+        hit: data[0],
+        chunkIndex: data[1],
+        cx: data[2],
+        cy: data[3],
+        cz: data[4],
+        blockId: data[5],
+        steps: data[6],  // SVDAG traversal steps within chunk
+        chunkSteps: data[7],  // How many chunks ray traversed
+        frame: this.frameCount  // Track which frame this is from
+      };
+      
+      this.debugInfoStaging.unmap();
+    } catch (err) {
+      // Ignore errors - buffer might be busy
+    } finally {
+      this.isReadingDebug = false;
     }
   }
 
