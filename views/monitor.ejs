@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title><%= title %></title>
+  <link rel="stylesheet" href="/css/monitor.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <div id="app">
+    <!-- Header -->
+    <header class="header">
+      <div class="header-left">
+        <h1>📊 V2 Pipeline Monitor</h1>
+        <span class="subtitle">Real-time Performance Metrics</span>
+      </div>
+      <div class="header-right">
+        <div class="status-indicator">
+          <span class="status-dot" id="status-dot"></span>
+          <span id="status-text">Connecting...</span>
+        </div>
+        <button class="btn btn-secondary" onclick="showProfileModal()">💾 Save Profile</button>
+        <button class="btn btn-secondary" onclick="showBaselineModal()">📊 Load Baseline</button>
+        <button class="btn btn-secondary" onclick="resetMetrics()">🔄 Reset</button>
+        <button class="btn btn-primary" onclick="window.open('/world', '_blank')">🎮 Enter World</button>
+      </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="main-content">
+      <!-- Overview Cards -->
+      <section class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-icon">⏱️</div>
+          <div class="stat-content">
+            <div class="stat-label">Uptime</div>
+            <div class="stat-value" id="uptime">--</div>
+          </div>
+        </div>
+
+        <div class="stat-card">
+          <div class="stat-icon">📦</div>
+          <div class="stat-content">
+            <div class="stat-label">Total Chunks</div>
+            <div class="stat-value" id="total-chunks">0</div>
+            <div class="stat-sub" id="request-rate">0 req/s</div>
+          </div>
+        </div>
+
+        <div class="stat-card">
+          <div class="stat-icon">💾</div>
+          <div class="stat-content">
+            <div class="stat-label">Cache Performance</div>
+            <div class="stat-value" id="cache-hit-rate">0%</div>
+            <div class="stat-sub">
+              <span id="cached-chunks">0</span> cached / 
+              <span id="region-cached-chunks">0</span> region / 
+              <span id="generated-chunks">0</span> full gen
+            </div>
+          </div>
+        </div>
+
+        <div class="stat-card">
+          <div class="stat-icon">⚡</div>
+          <div class="stat-content">
+            <div class="stat-label">Avg Response Time</div>
+            <div class="stat-value" id="avg-response">--</div>
+            <div class="stat-sub">Last 50: <span id="recent-response">--</span></div>
+          </div>
+        </div>
+
+        <div class="stat-card">
+          <div class="stat-icon">🗺️</div>
+          <div class="stat-content">
+            <div class="stat-label">Active Regions</div>
+            <div class="stat-value" id="active-regions">0</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Bottleneck Analysis -->
+      <section class="bottleneck-section">
+        <h3>Bottleneck Analysis</h3>
+        <div class="bottleneck-grid">
+          <div class="bottleneck-card">
+            <div class="bottleneck-icon">🌐</div>
+            <div class="bottleneck-content">
+              <div class="bottleneck-label">Network</div>
+              <div class="bottleneck-value" id="network-size">--</div>
+              <div class="bottleneck-sub">
+                <span id="network-bandwidth">--</span> | 
+                <span id="network-total">--</span> total
+              </div>
+            </div>
+          </div>
+          
+          <div class="bottleneck-card">
+            <div class="bottleneck-icon">💾</div>
+            <div class="bottleneck-content">
+              <div class="bottleneck-label">Memory (Heap)</div>
+              <div class="bottleneck-value" id="memory-heap">--</div>
+              <div class="bottleneck-sub" id="memory-rss">RSS: --</div>
+            </div>
+          </div>
+          
+          <div class="bottleneck-card">
+            <div class="bottleneck-icon">⚙️</div>
+            <div class="bottleneck-content">
+              <div class="bottleneck-label">Response Time</div>
+              <div class="bottleneck-value" id="bottleneck-response">--</div>
+              <div class="bottleneck-sub">Primary metric</div>
+            </div>
+          </div>
+          
+          <div class="bottleneck-card">
+            <div class="bottleneck-icon">📊</div>
+            <div class="bottleneck-content">
+              <div class="bottleneck-label">Throughput</div>
+              <div class="bottleneck-value" id="throughput">--</div>
+              <div class="bottleneck-sub">chunks/sec</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Baseline Comparison (hidden if no baseline) -->
+      <section class="comparison-section" id="comparison-section" style="display: none;">
+        <div class="comparison-header">
+          <h3>Performance Comparison</h3>
+          <div class="baseline-info">
+            <span>Baseline: <strong id="baseline-name">--</strong></span>
+            <button class="btn btn-small btn-secondary" onclick="clearBaseline()">✕ Clear</button>
+          </div>
+        </div>
+        <div class="comparison-grid" id="comparison-grid">
+          <!-- Populated dynamically -->
+        </div>
+      </section>
+
+      <!-- Charts Row -->
+      <section class="charts-row">
+        <div class="chart-card">
+          <h3>Request Rate & Cache Performance</h3>
+          <canvas id="requestChart"></canvas>
+        </div>
+        <div class="chart-card">
+          <h3>Response Time Distribution</h3>
+          <canvas id="timingChart"></canvas>
+        </div>
+      </section>
+
+      <!-- Pipeline Breakdown -->
+      <section class="pipeline-section">
+        <h3>Pipeline Stage Timing (ms)</h3>
+        <div class="pipeline-grid">
+          <div class="pipeline-stage">
+            <div class="stage-name">Base Elevation</div>
+            <div class="stage-time" id="time-baseElevation">--</div>
+            <div class="stage-bar"><div class="stage-bar-fill" id="bar-baseElevation"></div></div>
+          </div>
+          <div class="pipeline-stage">
+            <div class="stage-name">Pre-Erosion Moisture</div>
+            <div class="stage-time" id="time-preErosionMoisture">--</div>
+            <div class="stage-bar"><div class="stage-bar-fill" id="bar-preErosionMoisture"></div></div>
+          </div>
+          <div class="pipeline-stage">
+            <div class="stage-name">Hydraulic Erosion</div>
+            <div class="stage-time" id="time-erosion">--</div>
+            <div class="stage-bar"><div class="stage-bar-fill" id="bar-erosion"></div></div>
+          </div>
+          <div class="pipeline-stage">
+            <div class="stage-name">Post-Erosion Moisture</div>
+            <div class="stage-time" id="time-postErosionMoisture">--</div>
+            <div class="stage-bar"><div class="stage-bar-fill" id="bar-postErosionMoisture"></div></div>
+          </div>
+          <div class="pipeline-stage">
+            <div class="stage-name">Upscale (128→512)</div>
+            <div class="stage-time" id="time-upscale">--</div>
+            <div class="stage-bar"><div class="stage-bar-fill" id="bar-upscale"></div></div>
+          </div>
+          <div class="pipeline-stage">
+            <div class="stage-name">Chunk Generation</div>
+            <div class="stage-time" id="time-chunkGen">--</div>
+            <div class="stage-bar"><div class="stage-bar-fill" id="bar-chunkGen"></div></div>
+          </div>
+          <div class="pipeline-stage">
+            <div class="stage-name">SVDAG Build</div>
+            <div class="stage-time" id="time-svdagBuild">--</div>
+            <div class="stage-bar"><div class="stage-bar-fill" id="bar-svdagBuild"></div></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Recent Requests Table -->
+      <section class="recent-section">
+        <h3>Recent Requests (Last 20)</h3>
+        <div class="table-container">
+          <table class="requests-table">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Chunk</th>
+                <th>Status</th>
+                <th>Total Time</th>
+                <th>Base</th>
+                <th>Erosion</th>
+                <th>Upscale</th>
+                <th>Chunk Gen</th>
+                <th>SVDAG</th>
+              </tr>
+            </thead>
+            <tbody id="recent-requests">
+              <tr><td colspan="9" class="no-data">No requests yet...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Save Profile Modal -->
+  <div class="modal" id="save-profile-modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>💾 Save Performance Profile</h3>
+        <button class="modal-close" onclick="closeModal('save-profile-modal')">✕</button>
+      </div>
+      <div class="modal-body">
+        <label>Profile Name</label>
+        <input type="text" id="profile-name" placeholder="e.g., After Erosion Optimization" />
+        <label>Description (optional)</label>
+        <textarea id="profile-description" placeholder="Describe what makes this profile unique..."></textarea>
+        <div class="modal-info">
+          <strong>Current Stats:</strong>
+          <div id="profile-stats-preview">Loading...</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeModal('save-profile-modal')">Cancel</button>
+        <button class="btn btn-primary" onclick="saveProfile()">💾 Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Load Baseline Modal -->
+  <div class="modal" id="baseline-modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>📊 Load Performance Baseline</h3>
+        <button class="modal-close" onclick="closeModal('baseline-modal')">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="profiles-list" id="profiles-list">
+          <div class="loading">Loading profiles...</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeModal('baseline-modal')">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/js/monitor.js"></script>
+</body>
+</html>

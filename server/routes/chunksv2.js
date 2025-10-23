@@ -12,6 +12,7 @@ import {
   UpscaleNode
 } from '../lib/nodesv2/index.js';
 import { SVDAGBuilder } from '../services/svdagBuilder.js';
+import { metrics } from './monitor.js';
 
 const router = express.Router();
 
@@ -20,6 +21,9 @@ const router = express.Router();
 let device = null;
 let nodes = null;
 let initPromise = null;
+
+// SVDAG builder for chunk compression
+const svdagBuilder = new SVDAGBuilder();
 
 async function ensureInitialized() {
   if (initPromise) return initPromise;
@@ -91,9 +95,11 @@ async function getRegion(regionX, regionZ, seed) {
   }
 
   // console.log(`\n🌍 Generating region: (${regionX}, ${regionZ}) - CPU PIPELINE`);
-  const startTime = Date.now();
+  const regionStartTime = Date.now();
+  const timings = {}; // Track stage timings
 
   // Generate heightmap directly at 512×512 using CPU
+  const heightmapStart = Date.now();
   const heightmap = new Float32Array(512 * 512);
   
   // Helper: Smooth interpolation (smoothstep)
@@ -172,10 +178,13 @@ async function getRegion(regionX, regionZ, seed) {
       heightmap[z * 512 + x] = height;
     }
   }
+  
+  timings.heightmapGeneration = Date.now() - heightmapStart;
 
   const regionData = {
     heightmap,
-    resolution: 512
+    resolution: 512,
+    timings // Include timings in region data
   };
 
   // Cache the region
@@ -193,7 +202,7 @@ async function getRegion(regionX, regionZ, seed) {
   }
   avgHeight /= heightmap.length;
   
-  const elapsed = Date.now() - startTime;
+  const elapsed = Date.now() - regionStartTime;
   // console.log(`✅ Region generated in ${elapsed}ms (CPU)`);
   // console.log(`   ⛰️  Height range: ${minHeight.toFixed(1)} to ${maxHeight.toFixed(1)} (avg: ${avgHeight.toFixed(1)})`);
 
@@ -255,6 +264,9 @@ router.get('/worlds/:worldId/chunks/:x/:y/:z', async (req, res) => {
     
     const voxels = new Uint32Array(32 * 32 * 32);
     
+    // Track if region was cached or generated
+    const regionWasCached = regionTime < 1; // < 1ms means it was cached
+    
     // COLUMN TEST - 12x12 chunks wide, full height terrain
     let solidCount = 0;
     let airCount = 0;
@@ -298,24 +310,45 @@ router.get('/worlds/:worldId/chunks/:x/:y/:z', async (req, res) => {
     
     const voxelData = { voxels, solidVoxels: solidCount, airVoxels: airCount };
     
-    const chunkTime = Date.now() - chunkStart;
-    
-    // Build SVDAG
+    // Build SVDAG from voxels
     const svdagStart = Date.now();
+    const materialSVDAG = svdagBuilder.build(voxels, 32); // 32×32×32 chunk
+    const svdagTime = Date.now() - svdagStart;
     
-    const svdagBuilder = new SVDAGBuilder();
-    const materialSVDAG = svdagBuilder.build(voxelData.voxels, 32);
-    
-    // For now, opaqueSVDAG is same as materialSVDAG (no transparency)
+    // For now, opaque SVDAG is same as material SVDAG (no transparent blocks yet)
     const opaqueSVDAG = materialSVDAG;
-    
-    // Minimal logging for debug
-    // (disabled for performance)
     
     // Encode chunk data
     const buffer = encodeSVDAGChunk({ materialSVDAG, opaqueSVDAG });
     
     const totalTime = Date.now() - startTime;
+    const chunkGenTime = (Date.now() - chunkStart) - svdagTime; // Exclude SVDAG time
+    
+    // Record metrics with detailed stage timing
+    const regionKey = `${regionX}_${regionZ}`;
+    const stages = {
+      chunkGen: chunkGenTime,
+      svdagBuild: svdagTime
+    };
+    
+    // Add region generation timing (only for first chunk in region)
+    if (region.timings && !regionWasCached) {
+      // Map CPU heightmap generation to "baseElevation" for consistency with GPU pipeline
+      stages.baseElevation = region.timings.heightmapGeneration || 0;
+      // Note: erosion, upscale, etc. will be added when GPU pipeline is implemented
+    }
+    
+    metrics.recordRequest({
+      cx,
+      cy,
+      cz,
+      cached: false, // Chunk itself isn't cached (we always generate SVDAG)
+      regionCached: regionWasCached, // But region texture might be cached
+      totalTime,
+      regionKey,
+      chunkSize: buffer.length, // Track network payload size
+      stages
+    });
     
     // Set headers
     res.setHeader('Content-Type', 'application/octet-stream');

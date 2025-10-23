@@ -44,11 +44,11 @@ export class ChunkedSvdagRenderer {
       basic: true,
       chunks: true,
       eviction: false,
-      memory: false,
+      memory: true,
       meta: false,
       dedup: true,
       position: true,
-      inspector: true
+      inspector: false
     };
     this.debugLogging = {
       requests: false,

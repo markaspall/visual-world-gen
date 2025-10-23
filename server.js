@@ -5,6 +5,7 @@ import fs from 'fs/promises';
 
 // import chunkRoutes from './server/routes/chunks.js';  // V1 disabled
 import chunksV2Routes from './server/routes/chunksv2.js';
+import monitorRoutes from './server/routes/monitor.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -234,12 +235,21 @@ app.get('/worlds/:worldId/infinite', (req, res) => {
 // app.use('/api', chunkRoutes);  // V1 disabled
 app.use('/api/v2', chunksV2Routes);
 
+// Mount monitor routes (shares same process, can access metrics)
+app.use('/monitor', monitorRoutes);
+
 const server = app.listen(PORT, () => {
-  console.log(`🚀 Server running at http://localhost:${PORT}`);
+  console.log(`\n┌──────────────────────────────────────────┐`);
+  console.log(`│  🚀 Server running                       │`);
+  console.log(`│  http://localhost:${PORT}                    │`);
+  console.log(`├──────────────────────────────────────────┤`);
+  console.log(`│  📊 V2 Pipeline Monitor                  │`);
+  console.log(`│  http://localhost:${PORT}/monitor            │`);
+  console.log(`└──────────────────────────────────────────┘\n`);
   console.log(`📁 Storage directory: ${STORAGE_DIR}`);
   console.log(`🌍 Worlds directory: ${WORLDS_DIR}`);
   console.log(`📦 Server-side chunk generation enabled`);
-  console.log(`🎮 V2 pipeline available at /api/v2/*`);
+  console.log(`🎮 V2 pipeline available at /api/v2/*\n`);
 });
 
 // Keep server alive - prevent Node.js from exiting when event loop is empty

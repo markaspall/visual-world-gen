@@ -7,6 +7,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
+    "monitor": "node server/monitorServer.js",
     "test:gpu": "node server/test-gpu.js"
   },
   "keywords": ["webgpu", "procedural", "map-generation", "node-editor", "svdag", "voxel"],
